@@ -24,7 +24,9 @@ cursor.execute("""
         description TEXT,
         amount REAL,
         people TEXT,
-        share_per_person REAL
+        share_per_person REAL,
+        settled INTEGER DEFAULT 0,
+        settle_requested_by TEXT DEFAULT NULL
     )
 """)
 conn.commit()
@@ -75,85 +77,123 @@ user_name = st.session_state["logged_in_user"]["name"]
 
 st.title(f"💰 Welcome, {user_name}")
 
-# Fetch users from database
-cursor.execute("SELECT full_name FROM users")
-all_users = [row[0] for row in cursor.fetchall()]
+# **Tabs for Different Sections**
+tab1, tab2, tab3 = st.tabs(["➕ Add Expense", "📊 Balance & Tracking", "⏳ Pending Confirmations"])
 
-# **Expense Input Form**
-st.subheader("📝 Add Expense")
-with st.form("expense_form"):
-    expense_desc = st.text_input("📌 Description", placeholder="E.g., Dinner, Cab Fare")
-    amount = st.number_input("💵 Amount", min_value=0.0, format="%.2f")
-    selected_people = st.multiselect("👥 Split With", all_users, default=[user_name])
+# **Tab 1: Add Expense**
+with tab1:
+    st.subheader("📝 Add Expense")
 
-    submit = st.form_submit_button("Add Expense")
+    # Fetch users from database
+    cursor.execute("SELECT full_name FROM users")
+    all_users = [row[0] for row in cursor.fetchall()]
 
-    if submit:
-        if expense_desc and amount > 0 and selected_people:
-            share_per_person = round(amount / len(selected_people), 2)
+    with st.form("expense_form"):
+        expense_desc = st.text_input("📌 Description", placeholder="E.g., Dinner, Cab Fare")
+        amount = st.number_input("💵 Amount", min_value=0.0, format="%.2f")
+        selected_people = st.multiselect("👥 Split With", all_users, default=[user_name])
 
-            cursor.execute(
-                "INSERT INTO expenses (payer, description, amount, people, share_per_person) VALUES (?, ?, ?, ?, ?)",
-                (user_name, expense_desc, amount, ",".join(selected_people), share_per_person)
-            )
-            conn.commit()
-            st.success("✅ Expense added successfully!")
-            st.rerun()
+        submit = st.form_submit_button("Add Expense")
 
-# **Display Expenses (Only for Logged-in User)**
-st.subheader("📊 Your Expenses")
+        if submit:
+            if expense_desc and amount > 0 and selected_people:
+                share_per_person = round(amount / len(selected_people), 2)
 
-cursor.execute("SELECT payer, description, amount, people, share_per_person FROM expenses WHERE payer=? OR people LIKE ?", (user_name, f"%{user_name}%"))
-expenses_data = cursor.fetchall()
+                cursor.execute(
+                    "INSERT INTO expenses (payer, description, amount, people, share_per_person) VALUES (?, ?, ?, ?, ?)",
+                    (user_name, expense_desc, amount, ",".join(selected_people), share_per_person)
+                )
+                conn.commit()
+                st.success("✅ Expense added successfully!")
+                st.rerun()
 
-if expenses_data:
-    expense_df = pd.DataFrame(expenses_data, columns=["Payer", "Description", "Amount", "People", "Share Per Person"])
-    
-    # Convert "People" column into a capsule-like structure
-    expense_df["People"] = expense_df["People"].apply(lambda x: ", ".join(x.split(",")))
+# **Tab 2: Balance & Expense Tracking**
+with tab2:
+    st.subheader("📊 Your Expenses")
 
-    # **Display table with better readability**
-    st.dataframe(expense_df, use_container_width=True)
+    cursor.execute("SELECT id, payer, description, amount, people, share_per_person, settled, settle_requested_by FROM expenses WHERE payer=? OR people LIKE ?", (user_name, f"%{user_name}%"))
+    expenses_data = cursor.fetchall()
 
-# **Show Only the Logged-in User's Balance**
-st.subheader("📉 Your Balance Summary")
+    if expenses_data:
+        expense_df = pd.DataFrame(expenses_data, columns=["ID", "Payer", "Description", "Amount", "People", "Share Per Person", "Settled", "Settle Requested By"])
+        
+        # Convert "People" column into a readable format
+        expense_df["People"] = expense_df["People"].apply(lambda x: ", ".join(x.split(",")))
 
-balances = {}
+        # **Display table with better readability**
+        st.dataframe(expense_df.drop(columns=["ID", "Settled", "Settle Requested By"]), use_container_width=True)
 
-for payer, _, amount, people, share_per_person in expenses_data:
-    people_list = people.split(",")
+    # **Balance Summary with Fixes**
+    st.subheader("📉 Your Balance Summary")
 
-    if payer == user_name:
-        for person in people_list:
-            if person != user_name:
-                balances[person] = balances.get(person, 0) + share_per_person
+    balances = {}
+    expense_ids = {}
+    settle_requests = {}
 
-    elif user_name in people_list:
-        balances[payer] = balances.get(payer, 0) - share_per_person
+    for expense_id, payer, _, _, people, share_per_person, settled, settle_requested_by in expenses_data:
+        if settled:
+            continue
 
-# **Show summarized transactions per person**
-balance_text = []
-for person, balance in balances.items():
-    if balance > 0:
-        balance_text.append(f"🟢 {person} owes you ₹{balance:.2f}")
-    elif balance < 0:
-        balance_text.append(f"🔴 You owe {person} ₹{-balance:.2f}")
+        people_list = people.split(",")
 
-if balance_text:
-    st.write("\n".join(balance_text))
-else:
-    st.write("✅ You are settled!")
+        if payer == user_name:
+            for person in people_list:
+                if person != user_name:
+                    balances[person] = balances.get(person, 0) + share_per_person
+                    expense_ids[(person, payer)] = expense_id
+        elif user_name in people_list:
+            balances[payer] = balances.get(payer, 0) - share_per_person
+            expense_ids[(user_name, payer)] = expense_id
 
-# **Show final net balance**
-total_balance = sum(balances.values())
+        if settle_requested_by:
+            settle_requests[expense_id] = settle_requested_by
 
-st.subheader("⚖ Your Final Balance")
-if total_balance > 0:
-    st.success(f"🟢 You are owed ₹{total_balance:.2f}")
-elif total_balance < 0:
-    st.error(f"🔴 You owe ₹{-total_balance:.2f}")
-else:
-    st.info(f"⚖ You are settled!")
+    if not balances:
+        st.info("⚖ You're all settled!")
+    else:
+        for person, balance in balances.items():
+            col1, col2 = st.columns([4, 1])
+
+            with col1:
+                if balance > 0:
+                    st.success(f"🟢 {person} owes you ₹{balance:.2f}")
+                else:
+                    st.error(f"🔴 You owe {person} ₹{-balance:.2f}")
+
+            with col2:
+                expense_id = expense_ids.get((user_name, person))
+                if expense_id and expense_id in settle_requests:
+                    st.button("✅ Requested", key=f"requested_{person}", disabled=True)
+                elif balance < 0 and st.button("Request Settle", key=f"request_settle_{person}"):
+                    cursor.execute("UPDATE expenses SET settle_requested_by = ? WHERE id = ?", (user_name, expense_id))
+                    conn.commit()
+                    st.success(f"✅ Settlement request sent to {person}!")
+                    st.rerun()
+
+# **Tab 3: Pending Confirmations**
+with tab3:
+    st.subheader("⏳ Settlement Confirmations Needed")
+
+    cursor.execute("SELECT id, payer, people, share_per_person, settle_requested_by FROM expenses WHERE payer=? AND settled=0 AND settle_requested_by IS NOT NULL", (user_name,))
+    settle_requests = cursor.fetchall()
+
+    if not settle_requests:
+        st.info("✅ No pending settlements!")
+    else:
+        for expense_id, payer, people, share_per_person, requested_by in settle_requests:
+            st.warning(f"📢 {requested_by} has requested to settle ₹{share_per_person:.2f}. Confirm settlement?")
+
+            col1, col2 = st.columns(2)
+            if col1.button("✅ Confirm", key=f"confirm_{expense_id}"):
+                cursor.execute("UPDATE expenses SET settled = 1, settle_requested_by = NULL WHERE id = ?", (expense_id,))
+                conn.commit()
+                st.success(f"✅ Settlement with {requested_by} confirmed!")
+                st.rerun()
+            if col2.button("❌ Reject", key=f"reject_{expense_id}"):
+                cursor.execute("UPDATE expenses SET settle_requested_by = NULL WHERE id = ?", (expense_id,))
+                conn.commit()
+                st.warning(f"❌ Settlement request from {requested_by} rejected!")
+                st.rerun()
 
 # **Logout Button**
 if st.button("🚪 Logout", use_container_width=True):
