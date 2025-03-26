@@ -1,0 +1,2 @@
+# kanak-splitwise
+personal splitwise
