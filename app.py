@@ -1,3 +1,4 @@
+```python
 import os
 import json
 import tempfile
@@ -107,12 +108,16 @@ def extract_vba(state: VBAState) -> VBAState:
 def categorize_vba(state: VBAState) -> VBAState:
     with st.spinner("Categorizing code..."):
         prompt = (
-            "Classify the following VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n"
-            + state["vba_code"]
+            "Classify the following VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations.
+"  
+            "Return only the category.
+
+" + state["vba_code"]
         )
         cat = "".join(stream_claude(prompt)).strip().lower()
         state["category"] = cat if cat in PROMPTS else "normal_operations"
-    st.write(f"**Detected category:** {state['category']}")
+    with st.expander("Step 2: Detected Category"):
+        st.markdown(f"**Category detected:** {state['category']}")
     progress.progress(40)
     return state
 
@@ -233,3 +238,4 @@ if st.session_state["generated_code"] is None:
     st.success("✅ Conversion & AI Auto-Fix completed!")
 else:
     st.success("✅ Already processed.")
+```
