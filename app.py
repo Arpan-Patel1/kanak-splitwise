@@ -1,3 +1,4 @@
+```python
 import os
 import json
 import tempfile
@@ -18,11 +19,10 @@ PROMPTS = {
     "pivot_table": """I have the following VBA code that creates a Pivot Table in Excel:\n{vba_code}
 Please write equivalent Python code that:
 - Produces the same summarized data the pivot table would show.
-- Uses pandas to perform the summary.
-- Saves the resulting table into a sheet in the same Excel file using pandas.ExcelWriter.
+- Uses pandas to perform the summary.\n- Saves the resulting table into a sheet in the same Excel file using pandas.ExcelWriter.
 - Uses only real, supported APIs.
 Ensure the code runs end-to-end.""",
-    # ... other categories ...
+    # Add other categories similarly...
     "normal_operations": """I have the following VBA code that performs normal Excel operations:\n{vba_code}
 Please write equivalent Python code using openpyxl or pandas to replicate the logic.
 Ensure the code runs end-to-end."""
@@ -146,27 +146,27 @@ def generate_python_code(state: VBAState) -> VBAState:
 
 
 def verify_and_fix_code(state: VBAState) -> VBAState:
-    st.subheader("Step 5: AI Verification & Fix")
+    st.subheader("Step 5: AI Verify & Fix Libraries/Syntax")
     code = state.get("generated_code", "")
     xlsx_file = os.path.basename(st.session_state['xlsx_path'])
 
-    # First: ask AI what it will fix
-    st.markdown("**Planned Fixes:**")
+    # 1) AI lists what it will fix
     summary_prompt = (
-        "List pointwise what you will fix in the following Python code. Also ensure any Excel path is replaced with '" + xlsx_file + "'.\n```python\n" + code + "\n```"
+        "List pointwise what you will fix in this Python code: ensure all imports exist and syntax is error-free, "
+        f"and replace any Excel path with '{xlsx_file}'.\n```python\n{code}\n```"
     )
     fixes = ""
-    for chunk in stream_claude(summary_prompt):
-        fixes += chunk
+    for chunk in stream_claude(summary_prompt): fixes += chunk
+    st.markdown("**Fix Summary:**")
     st.markdown(fixes)
 
-    # Now: request the corrected code
+    # 2) AI applies fixes and replaces file paths
     fix_prompt = (
-        "Now provide the fully corrected Python code implementing those fixes, using real libraries and replacing file paths with '" + xlsx_file + "'. Respond with only the code in a Python block.\n" + fixes
+        "Now provide the corrected Python code implementing those fixes, using only real libraries and replacing paths with '"
+        + xlsx_file + "'. Respond with only the code block.\n" + fixes
     )
     acc = ""
-    for chunk in stream_claude(fix_prompt):
-        acc += chunk
+    for chunk in stream_claude(fix_prompt): acc += chunk
     if "```python" in acc:
         s = acc.find("```python") + len("```python")
         e = acc.find("```", s)
@@ -189,6 +189,7 @@ def verify_and_fix_code(state: VBAState) -> VBAState:
 # =====================
 # Build StateGraph
 # =====================
+
 def build_graph():
     g = StateGraph(VBAState)
     for name, fn in [
@@ -210,6 +211,7 @@ def build_graph():
 # =====================
 # Streamlit App
 # =====================
+
 st.set_page_config(page_title="VBA2PyGen", layout="wide")
 st.markdown("""
 <style>
@@ -218,7 +220,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 st.title("VBA2PyGen with AI Auto-Fix")
-st.markdown("Upload your Excel file and let AI convert, summarize fixes pointwise, fix code and replace paths automatically.")
+st.markdown("Upload your Excel file and let AI convert, summarize fixes pointwise, fix code, and replace paths.")
 progress = st.progress(0)
 
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm","xlsb","xls"])
@@ -229,9 +231,9 @@ if not uploaded_file:
     st.stop()
 
 # Save and strip macros
-xlsx_path, base_name = save_uploaded_file(uploaded_file)
-st.session_state['xlsx_path'] = xlsx_path
-st.markdown(f"**Macro-stripped copy:** `{xlsx_path}`")
+txlsx_path, base_name = save_uploaded_file(uploaded_file)
+st.session_state['xlsx_path'] = txlsx_path
+st.markdown(f"**Macro-stripped copy:** `{txlsx_path}`")
 
 if "generated_code" not in st.session_state:
     st.session_state["generated_code"] = None
@@ -246,6 +248,7 @@ if st.session_state["generated_code"] is None:
     for state in graph.stream({"file_path": tmp_path}):
         final = state
 
-    st.success("✅ Conversion & Auto-Fix completed!")
+    st.success("✅ Conversion & AI Auto-Fix completed!")
 else:
     st.success("✅ Already processed.")
+```
