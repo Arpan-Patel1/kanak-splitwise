@@ -15,53 +15,53 @@ from langgraph.graph import StateGraph, END
 # =====================
 PROMPTS = {
     "pivot_table": """I have the following VBA code that creates a Pivot Table in Excel:\n{vba_code}
-    Please write equivalent Python code that:
-    - Produces the same summarized data the pivot table would show (e.g., group by fields, aggregation like SUM, COUNT, AVERAGE).
-    - Uses pandas to perform the summary using pivot_table() or groupby().
-    - Saves the resulting table into a sheet where it is supposed to be in the same Excel file using pandas.ExcelWriter or openpyxl.
-    - Does not create a real Excel PivotTable, and does not use any fake or unsupported APIs like openpyxl.worksheet.table.tables.Table.
-    - Make sure all Python libraries used are valid and the code runs end-to-end.
-    """,
+Please write equivalent Python code that:
+- Produces the same summarized data the pivot table would show (e.g., group by fields, aggregation like SUM, COUNT, AVERAGE).
+- Uses pandas to perform the summary using pivot_table() or groupby().
+- Saves the resulting table into a sheet where it is supposed to be in the same Excel file using pandas.ExcelWriter or openpyxl.
+- Does not create a real Excel PivotTable, and does not use any fake or unsupported APIs like openpyxl.worksheet.table.tables.Table.
+- Make sure all Python libraries used are valid and the code runs end-to-end.
+""",
 
     "pivot_chart": """I have the following VBA code that creates a Pivot Chart in Excel:\n{vba_code}
-    Uses pandas to perform the same data summarization (as done by the PivotTable feeding the chart).
-    Generates a chart that visually represents the same data, using a real Python charting library like matplotlib, seaborn, or plotly.
-    The chart type should match what’s used in the VBA (e.g., column chart, line chart, pie chart, etc.).
-    Saves the resulting chart to an image file (PNG/JPG) or embeds it into a new sheet of the same Excel workbook using openpyxl or xlsxwriter (if possible).
-    Avoid using any non-existent Excel chart APIs in openpyxl or other libraries.
-    Make sure all code is real, valid, and executable with standard Python libraries. Do not use functions like (ws.clear_rows())
-    """,
+Uses pandas to perform the same data summarization (as done by the PivotTable feeding the chart).
+Generates a chart that visually represents the same data, using a real Python charting library like matplotlib, seaborn, or plotly.
+The chart type should match what’s used in the VBA (e.g., column chart, line chart, pie chart, etc.).
+Saves the resulting chart to an image file (PNG/JPG) or embeds it into a new sheet of the same Excel workbook using openpyxl or xlsxwriter (if possible).
+Avoid using any non-existent Excel chart APIs in openpyxl or other libraries.
+Make sure all code is real, valid, and executable with standard Python libraries. Do not use functions like (ws.clear_rows())
+""",
 
-    "user_form": """I have the following VBA code that creates and handles a UserForm in Excel: \n{vba_code}
-    Please generate equivalent Python code that:
-    - Replicates the logic and UI flow of the UserForm.
-    - If the VBA code uses form fields like textboxes, dropdowns, buttons, etc., map them to similar components in a Python GUI using Tkinter or PyQt5.
-    - If the UserForm is used for data entry into Excel, make sure the Python version captures user input and writes it to the Excel file using pandas or openpyxl.
-    Do not use fake or unsupported libraries or UI frameworks like (from openpyxl.pivot.table import PivotTable).
-    Ensure the code uses only real, valid Python functions and libraries that exist.
-    The Python script should be self-contained and executable, and replicate the VBA UserForm’s functionality as closely as possible.
-    """,
+    "user_form": """I have the following VBA code that creates and handles a UserForm in Excel:\n{vba_code}
+Please generate equivalent Python code that:
+- Replicates the logic and UI flow of the UserForm.
+- If the VBA code uses form fields like textboxes, dropdowns, buttons, etc., map them to similar components in a Python GUI using Tkinter or PyQt5.
+- If the UserForm is used for data entry into Excel, make sure the Python version captures user input and writes it to the Excel file using pandas or openpyxl.
+Do not use fake or unsupported libraries or UI frameworks like (from openpyxl.pivot.table import PivotTable).
+Ensure the code uses only real, valid Python functions and libraries that exist.
+The Python script should be self-contained and executable, and replicate the VBA UserForm’s functionality as closely as possible.
+""",
 
     "formula": """I have the following VBA or Excel formula-based code:\n{vba_code}
-    Please generate equivalent Python code that:
-    - Replicates the same logic and calculations performed by the formulas.
-    - Uses real Python libraries like pandas, numpy, or openpyxl to evaluate the logic.
-    - If the formulas are row-wise, apply them using pandas.apply() or vectorized operations.
-    - If they reference Excel ranges, load the file using pandas.read_excel() or openpyxl, and apply the logic accordingly.
-    The goal is to get the same results as Excel would, but entirely in Python.
-    Do not embed Excel formulas into the cells, but instead compute the result in Python and write the final value back to Excel.
-    Make sure all code uses valid Python syntax and libraries that actually exist.
-    """,
+Please generate equivalent Python code that:
+- Replicates the same logic and calculations performed by the formulas.
+- Uses real Python libraries like pandas, numpy, or openpyxl to evaluate the logic.
+- If the formulas are row-wise, apply them using pandas.apply() or vectorized operations.
+- If they reference Excel ranges, load the file using pandas.read_excel() or openpyxl, and apply the logic accordingly.
+The goal is to get the same results as Excel would, but entirely in Python.
+Do not embed Excel formulas into the cells, but instead compute the result in Python and write the final value back to Excel.
+Make sure all code uses valid Python syntax and libraries that actually exist.
+""",
 
     "normal_operations": """I have the following VBA code that performs normal Excel operations (like inserting rows, copying values, deleting columns, formatting cells, renaming sheets, etc.):\n{vba_code}
-    Please write equivalent Python code that:
-    - Performs the same operations using valid Python libraries like openpyxl or pandas.
-    - If the VBA modifies sheet structure (insert/delete rows/columns, rename sheets, copy data), implement the same logic using openpyxl.
-    - If the VBA performs value-level operations (like replacing text, copying cell values), use openpyxl or pandas appropriately.
-    - If any formatting is applied (e.g. bold text, cell colors, borders), replicate that formatting using openpyxl.styles.
-    Do not use any unsupported or fake APIs — only use functions and methods that exist in real Python libraries.
-    The final code should be fully executable and equivalent in logic to the original VBA.
-    """
+Please write equivalent Python code that:
+- Performs the same operations using valid Python libraries like openpyxl or pandas.
+- If the VBA modifies sheet structure (insert/delete rows/columns, rename sheets, copy data), implement the same logic using openpyxl.
+- If the VBA performs value-level operations (like replacing text, copying cell values), use openpyxl or pandas appropriately.
+- If any formatting is applied (e.g. bold text, cell colors, borders), replicate that formatting using openpyxl.styles.
+Do not use any unsupported or fake APIs — only use functions and methods that exist in real Python libraries.
+The final code should be fully executable and equivalent in logic to the original VBA.
+"""
 }
 
 # =====================
@@ -241,17 +241,21 @@ if uploaded_file is None:
 # Initialize session state
 if "generated_code" not in st.session_state:
     st.session_state["generated_code"] = None
-
 if "base_name" not in st.session_state:
     st.session_state["base_name"] = None
 
 # Run conversion pipeline once per upload
 if st.session_state["generated_code"] is None:
-    file_path, base_name = save_uploaded_file(uploaded_file)
-    st.session_state["base_name"] = base_name
+    # Preserve macros for extraction
+    suffix = os.path.splitext(uploaded_file.name)[1]
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        tmp_path = tmp.name
+
+    st.session_state["base_name"] = os.path.splitext(uploaded_file.name)[0]
 
     graph = build_graph()
-    initial_state: VBAState = {"file_path": file_path}
+    initial_state: VBAState = {"file_path": tmp_path}
     for state in graph.stream(initial_state):
         final_state = state
 
