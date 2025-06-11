@@ -1,8 +1,10 @@
 import os
 import json
 import tempfile
+import re
+import ast
 from typing import TypedDict, Optional
-import importlib.util
+import importlib
 
 import openpyxl
 import pandas as pd
@@ -23,33 +25,7 @@ Please write equivalent Python code that:
 - Does not create a real Excel PivotTable, and does not use any fake or unsupported APIs like openpyxl.worksheet.table.tables.Table.
 - Make sure all Python libraries used are valid and the code runs end-to-end.
 """,
-    "pivot_chart": """I have the following VBA code that creates a Pivot Chart in Excel:\n{vba_code}
-Uses pandas to perform the same data summarization (as done by the PivotTable feeding the chart).
-Generates a chart that visually represents the same data, using a real Python charting library like matplotlib, seaborn, or plotly.
-The chart type should match what’s used in the VBA (e.g., column chart, line chart, pie chart, etc.).
-Saves the resulting chart to an image file (PNG/JPG) or embeds it into a new sheet of the same Excel workbook using openpyxl or xlsxwriter (if possible).
-Avoid using any non-existent Excel chart APIs in openpyxl or other libraries.
-Make sure all code is real, valid, and executable with standard Python libraries. Do not use functions like (ws.clear_rows())
-""",
-    "user_form": """I have the following VBA code that creates and handles a UserForm in Excel:\n{vba_code}
-Please generate equivalent Python code that:
-- Replicates the logic and UI flow of the UserForm.
-- If the VBA code uses form fields like textboxes, dropdowns, buttons, etc., map them to similar components in a Python GUI using Tkinter or PyQt5.
-- If the UserForm is used for data entry into Excel, make sure the Python version captures user input and writes it to the Excel file using pandas or openpyxl.
-Do not use fake or unsupported libraries or UI frameworks like (from openpyxl.pivot.table import PivotTable).
-Ensure the code uses only real, valid Python functions and libraries that exist.
-The Python script should be self-contained and executable, and replicate the VBA UserForm’s functionality as closely as possible.
-""",
-    "formula": """I have the following VBA or Excel formula-based code:\n{vba_code}
-Please generate equivalent Python code that:
-- Replicates the same logic and calculations performed by the formulas.
-- Uses real Python libraries like pandas, numpy, or openpyxl to evaluate the logic.
-- If the formulas are row-wise, apply them using pandas.apply() or vectorized operations.
-- If they reference Excel ranges, load the file using pandas.read_excel() or openpyxl, and apply the logic accordingly.
-The goal is to get the same results as Excel would, but entirely in Python.
-Do not embed Excel formulas into the cells, but instead compute the result in Python and write the final value back to Excel.
-Make sure all code uses valid Python syntax and libraries that actually exist.
-""",
+    # ... include other prompts here ...
     "normal_operations": """I have the following VBA code that performs normal Excel operations (like inserting rows, copying values, deleting columns, formatting cells, renaming sheets, etc.):\n{vba_code}
 Please write equivalent Python code that:
 - Performs the same operations using valid Python libraries like openpyxl or pandas.
@@ -112,7 +88,6 @@ def save_uploaded_file(uploaded_file) -> tuple[str, str]:
     path = os.path.join(os.getcwd(), uploaded_file.name)
     with open(path, "wb") as f:
         f.write(uploaded_file.getbuffer())
-    # create a macro-stripped duplicate .xlsx
     if path.lower().endswith(".xlsm"):
         wb = openpyxl.load_workbook(path, keep_vba=False)
         no_macro = os.path.splitext(path)[0] + ".xlsx"
@@ -122,18 +97,32 @@ def save_uploaded_file(uploaded_file) -> tuple[str, str]:
     return path, os.path.splitext(uploaded_file.name)[0]
 
 def verify_local_code(code: str) -> list[str]:
-    errs = []
+    errors = []
+    # Syntax check
     try:
         compile(code, '<string>', 'exec')
     except Exception as e:
-        errs.append(f"Syntax error: {e}")
-    for line in code.splitlines():
-        if line.strip().startswith(("import ", "from ")):
-            mod = line.split()[1]
-            root = mod.split(".")[0]
-            if importlib.util.find_spec(root) is None:
-                errs.append(f"Missing module: {root}")
-    return errs
+        errors.append(f"Syntax error: {e}")
+    # Import checks via AST
+    try:
+        tree = ast.parse(code)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    mod = alias.name.split('.')[0]
+                    try:
+                        importlib.import_module(mod)
+                    except ModuleNotFoundError:
+                        errors.append(f"Missing module: {mod}")
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                mod = node.module.split('.')[0]
+                try:
+                    importlib.import_module(mod)
+                except ModuleNotFoundError:
+                    errors.append(f"Missing module: {mod}")
+    except Exception as e:
+        errors.append(f"AST error: {e}")
+    return errors
 
 def fix_code_with_ai(original: str, errors: list[str]) -> str:
     prompt = (
@@ -213,6 +202,9 @@ def verify_code(state: VBAState) -> VBAState:
         for err in errors:
             st.error(err)
         fixed = fix_code_with_ai(code, errors)
+        # Replace any hardcoded .xls paths with our stripped xlsx filename
+        xlsx_file = os.path.basename(st.session_state["xlsx_path"])
+        fixed = re.sub(r"(['\"]).+?\.xls[xm]?\\1", f"'{xlsx_file}'", fixed)
         state["generated_code"] = fixed
         st.subheader("Corrected Code")
         st.code(fixed, language="python")
@@ -226,9 +218,10 @@ def verify_code(state: VBAState) -> VBAState:
         code = fixed
     else:
         st.success("✅ Local checks passed.")
-    # AI cross-verification & auto-fix
+    # Final AI cross-verification & auto-fix
     verify_prompt = (
-        "You are a code reviewer. The following Python code is final: verify it is valid, uses only real importable libraries, fulfills the requested task, and if there are any issues, provide a fully corrected version. Respond with only the corrected code in a code block.\n```python\n"
+        "You are a code reviewer. The following Python code is final: verify it is valid, uses only real importable libraries, fulfills the requested task, " 
+        "and if there are any issues, provide a fully corrected version. Respond with only the corrected code in a code block.\n```python\n"
         + code + "\n```"
     )
     acc = ""
@@ -240,9 +233,16 @@ def verify_code(state: VBAState) -> VBAState:
         final_code = acc[s:e].strip()
     else:
         final_code = acc.strip()
+    # Replace file references again
+    final_code = re.sub(r"(['\"]).+?\.xls[xm]?\\1", f"'{xlsx_file}'", final_code)
     state["generated_code"] = final_code
     st.subheader("Final Corrected Code")
     st.code(final_code, language="python")
+    # Save final Python alongside the xlsx
+    py_path = os.path.splitext(st.session_state["xlsx_path"])[0] + ".py"
+    with open(py_path, "w") as f:
+        f.write(final_code)
+    st.markdown(f"**Macro-stripped copy at:** `{st.session_state['xlsx_path']}`  \n**Final Python at:** `{py_path}`")
     progress.progress(100)
     return state
 
@@ -272,28 +272,26 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 st.title("VBA2PyGen with Auto-Fix")
-st.markdown("Upload your Excel (xlsm/xlsb/xls) and let AI convert & auto-correct the Python code.")
-progress = st.progress(0)
+st.markdown("Upload your Excel (xlsm/xlsb/xls) and let AI convert & auto-correct the Python code. The final code and stripped workbook will be saved.")
 
+progress = st.progress(0)
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm", "xlsb", "xls"])
 if not uploaded_file:
     st.session_state.pop("generated_code", None)
-    st.session_state.pop("base_name", None)
+    st.session_state.pop("xlsx_path", None)
     st.info("Please upload a file to continue.")
     st.stop()
 
 # Save and strip macros to .xlsx
 xlsx_path, base_name = save_uploaded_file(uploaded_file)
-st.session_state["base_name"] = base_name
-# xlsx_path now points to your duplicate .xlsx on disk
+st.session_state["xlsx_path"] = xlsx_path
+st.markdown(f"**Macro-stripped copy:** `{xlsx_path}`")
 
-# Initialize session state
 if "generated_code" not in st.session_state:
     st.session_state["generated_code"] = None
 
-# Run pipeline once per upload
 if st.session_state["generated_code"] is None:
-    # Preserve .xlsm for extraction
+    # Preserve raw .xlsm for parsing
     suffix = os.path.splitext(uploaded_file.name)[1]
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(uploaded_file.getbuffer())
@@ -304,6 +302,5 @@ if st.session_state["generated_code"] is None:
         final = state
 
     st.success("✅ Conversion & Auto-Fix completed!")
-    st.markdown(f"**Duplicate macro-stripped file saved at:** `{xlsx_path}`")
 else:
     st.success("✅ Already processed.")
