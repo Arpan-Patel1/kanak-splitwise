@@ -112,6 +112,7 @@ def save_uploaded_file(uploaded_file) -> tuple[str, str]:
     path = os.path.join(os.getcwd(), uploaded_file.name)
     with open(path, "wb") as f:
         f.write(uploaded_file.getbuffer())
+    # create a macro-stripped duplicate .xlsx
     if path.lower().endswith(".xlsm"):
         wb = openpyxl.load_workbook(path, keep_vba=False)
         no_macro = os.path.splitext(path)[0] + ".xlsx"
@@ -274,26 +275,35 @@ st.title("VBA2PyGen with Auto-Fix")
 st.markdown("Upload your Excel (xlsm/xlsb/xls) and let AI convert & auto-correct the Python code.")
 progress = st.progress(0)
 
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm","xlsb","xls"])
+uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm", "xlsb", "xls"])
 if not uploaded_file:
     st.session_state.pop("generated_code", None)
     st.session_state.pop("base_name", None)
     st.info("Please upload a file to continue.")
     st.stop()
 
+# Save and strip macros to .xlsx
+xlsx_path, base_name = save_uploaded_file(uploaded_file)
+st.session_state["base_name"] = base_name
+# xlsx_path now points to your duplicate .xlsx on disk
+
+# Initialize session state
 if "generated_code" not in st.session_state:
     st.session_state["generated_code"] = None
-    st.session_state["base_name"] = None
 
+# Run pipeline once per upload
 if st.session_state["generated_code"] is None:
+    # Preserve .xlsm for extraction
     suffix = os.path.splitext(uploaded_file.name)[1]
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(uploaded_file.getbuffer())
         tmp_path = tmp.name
-    st.session_state["base_name"] = os.path.splitext(uploaded_file.name)[0]
+
     graph = build_graph()
     for state in graph.stream({"file_path": tmp_path}):
         final = state
+
     st.success("✅ Conversion & Auto-Fix completed!")
+    st.markdown(f"**Duplicate macro-stripped file saved at:** `{xlsx_path}`")
 else:
     st.success("✅ Already processed.")
