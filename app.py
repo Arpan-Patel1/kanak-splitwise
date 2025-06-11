@@ -2,6 +2,7 @@ import os
 import json
 import tempfile
 from typing import TypedDict, Optional
+import importlib.util
 
 import openpyxl
 import pandas as pd
@@ -74,7 +75,7 @@ bedrock = boto3.client("bedrock-runtime")
 # =====================
 def stream_claude(prompt: str):
     try:
-        body = {
+        payload = {
             "anthropic_version": "bedrock-2023-05-31",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 4000,
@@ -82,24 +83,24 @@ def stream_claude(prompt: str):
             "top_p": 0.9,
             "top_k": 250,
         }
-        response = bedrock.invoke_model_with_response_stream(
+        resp = bedrock.invoke_model_with_response_stream(
             modelId=(
                 "arn:aws:bedrock:us-east-1:137360334857:"
                 "inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"
             ),
-            body=json.dumps(body),
+            body=json.dumps(payload),
         )
-        for event in response["body"]:
+        for event in resp["body"]:
             chunk = json.loads(event["chunk"]["bytes"])
             if delta := chunk.get("delta"):
                 if text := delta.get("text"):
                     yield text
     except Exception as e:
-        st.error(f"Error streaming Claude response: {e}")
+        st.error(f"Claude error: {e}")
         st.stop()
 
 # =====================
-# LangGraph state definition
+# Type definitions
 # =====================
 class VBAState(TypedDict):
     file_path: Optional[str]
@@ -109,161 +110,187 @@ class VBAState(TypedDict):
     generated_code: Optional[str]
 
 # =====================
-# Save & strip macros utility
+# Utilities
 # =====================
 def save_uploaded_file(uploaded_file) -> tuple[str, str]:
-    original = os.path.join(os.getcwd(), uploaded_file.name)
-    with open(original, "wb") as f:
+    path = os.path.join(os.getcwd(), uploaded_file.name)
+    with open(path, "wb") as f:
         f.write(uploaded_file.getbuffer())
-    if original.lower().endswith(".xlsm"):
-        wb = openpyxl.load_workbook(original, keep_vba=False)
-        no_macro = os.path.splitext(original)[0] + ".xlsx"
+    if path.lower().endswith(".xlsm"):
+        wb = openpyxl.load_workbook(path, keep_vba=False)
+        no_macro = os.path.splitext(path)[0] + ".xlsx"
         wb.save(no_macro)
-        os.remove(original)
+        os.remove(path)
         return no_macro, os.path.splitext(uploaded_file.name)[0]
-    return original, os.path.splitext(uploaded_file.name)[0]
+    return path, os.path.splitext(uploaded_file.name)[0]
+
+def verify_local_code(code: str) -> list[str]:
+    errs = []
+    try:
+        compile(code, '<string>', 'exec')
+    except Exception as e:
+        errs.append(f"Syntax error: {e}")
+    for line in code.splitlines():
+        if line.strip().startswith(("import ", "from ")):
+            mod = line.split()[1]
+            root = mod.split(".")[0]
+            if importlib.util.find_spec(root) is None:
+                errs.append(f"Missing module: {root}")
+    return errs
+
+def fix_code_with_ai(original: str, errors: list[str]) -> str:
+    prompt = (
+        "The following Python code has errors: " + ", ".join(errors) +
+        ". Please provide corrected code that runs without errors, uses only real libraries, "
+        "and implements the intended functionality.\n```python\n"
+        + original + "\n```"
+    )
+    acc = ""
+    for chunk in stream_claude(prompt):
+        acc += chunk
+    # extract code block
+    if "```python" in acc:
+        s = acc.find("```python") + len("```python")
+        e = acc.find("```", s)
+        return acc[s:e].strip()
+    return acc.strip()
 
 # =====================
-# Step 1: Extract VBA
+# Step functions
 # =====================
 def extract_vba(state: VBAState) -> VBAState:
     st.subheader("Step 1: Extracting VBA code")
     try:
         parser = VBA_Parser(state["file_path"])
     except Exception as e:
-        st.error(f"Failed to parse VBA macros: {e}")
+        st.error(f"Parse error: {e}")
         st.stop()
-    modules = []
-    if parser.detect_vba_macros():
-        for _, _, _, code in parser.extract_macros():
-            if code.strip():
-                modules.append(code.strip())
+    modules = [code.strip() for _, _, _, code in parser.extract_macros() if code.strip()]
     if not modules:
-        st.error("No VBA macros found in the file!")
+        st.error("No VBA macros found.")
         st.stop()
     state["vba_code"] = "\n\n".join(modules)
-    with st.expander("Extracted VBA Code"):
-        st.text_area("Extracted VBA Code", state["vba_code"], height=300)
+    with st.expander("VBA Code"):
+        st.text_area("VBA macros", state["vba_code"], height=300)
     progress.progress(20)
     return state
 
-# =====================
-# Step 2: Categorize
-# =====================
 def categorize_vba(state: VBAState) -> VBAState:
     st.subheader("Step 2: Categorizing VBA code")
     prompt = (
-        "Classify the following VBA code into one of these categories: "
-        "formulas, pivot_table, pivot_chart, user_form, normal_operations. "
-        "Only return the category name without any explanation.\n\n"
-        f"{state['vba_code']}"
+        "Classify the following VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. "
+        "Return only the category.\n\n" + state["vba_code"]
     )
-    resp = "".join(stream_claude(prompt)).strip().lower()
-    state["category"] = resp if resp in PROMPTS else "normal_operations"
-    st.success(f"Detected category: {state['category']}")
+    cat = "".join(stream_claude(prompt)).strip().lower()
+    state["category"] = cat if cat in PROMPTS else "normal_operations"
+    st.success(f"Category: {state['category']}")
     progress.progress(40)
     return state
 
-# =====================
-# Step 3: Build Prompt
-# =====================
 def build_prompt(state: VBAState) -> VBAState:
-    st.subheader("Step 3: Building prompt for AI")
-    template = PROMPTS[state["category"]]
-    state["final_prompt"] = template.format(vba_code=state["vba_code"])
+    st.subheader("Step 3: Building AI prompt")
+    state["final_prompt"] = PROMPTS[state["category"]].format(vba_code=state["vba_code"])
     with st.expander("AI Prompt"):
-        st.text_area("AI Prompt", state["final_prompt"], height=200)
+        st.text_area("Prompt", state["final_prompt"], height=200)
     progress.progress(60)
     return state
 
-# =====================
-# Step 4: Generate Code
-# =====================
 def generate_python_code(state: VBAState) -> VBAState:
     st.subheader("Step 4: Generating Python code")
     full = "".join(stream_claude(state["final_prompt"]))
     code = full
     if "```python" in full:
-        start = full.find("```python") + len("```python")
-        end = full.find("```", start)
-        code = full[start:end].strip()
-    with st.expander("Generated Python Code"):
-        st.text_area("Generated Python Code", code, height=300)
-    progress.progress(100)
-    out = f"{st.session_state['base_name']}.py"
-    with open(out, "w") as f:
-        f.write(code)
+        s = full.find("```python") + len("```python")
+        e = full.find("```", s)
+        code = full[s:e].strip()
+    with st.expander("Generated Code"):
+        st.code(code, language="python")
+    progress.progress(80)
     state["generated_code"] = code
     return state
 
+def verify_code(state: VBAState) -> VBAState:
+    st.subheader("Step 5: Verifying & fixing code")
+    code = state.get("generated_code", "")
+    errors = verify_local_code(code)
+    if errors:
+        for err in errors:
+            st.error(err)
+        fixed = fix_code_with_ai(code, errors)
+        state["generated_code"] = fixed
+        st.subheader("Corrected Code")
+        st.code(fixed, language="python")
+        errs2 = verify_local_code(fixed)
+        if errs2:
+            for err in errs2:
+                st.error(err)
+            st.stop()
+        else:
+            st.success("✅ Corrected code passes local checks.")
+    else:
+        st.success("✅ Local checks passed.")
+    st.subheader("AI Cross-Verification")
+    verify_prompt = (
+        "You are a code reviewer. Analyze the following Python code and confirm it is valid, uses only real importable libraries, "
+        "and fulfills the requested task. List any issues.\n```python\n"
+        + state["generated_code"] + "\n```"
+    )
+    feedback = ""
+    for chunk in stream_claude(verify_prompt):
+        feedback += chunk
+    st.markdown(feedback)
+    progress.progress(100)
+    return state
+
 # =====================
-# Build the Graph
+# Build StateGraph
 # =====================
 def build_graph():
     g = StateGraph(VBAState)
-    g.add_node("extract_vba", extract_vba)
-    g.add_node("categorize_vba", categorize_vba)
-    g.add_node("build_prompt", build_prompt)
-    g.add_node("generate_python_code", generate_python_code)
+    for name in ["extract_vba", "categorize_vba", "build_prompt", "generate_python_code", "verify_code"]:
+        g.add_node(name, globals()[name])
     g.set_entry_point("extract_vba")
     g.add_edge("extract_vba", "categorize_vba")
     g.add_edge("categorize_vba", "build_prompt")
     g.add_edge("build_prompt", "generate_python_code")
-    g.add_edge("generate_python_code", END)
+    g.add_edge("generate_python_code", "verify_code")
+    g.add_edge("verify_code", END)
     return g.compile()
 
 # =====================
-# Streamlit UI & Pipeline
+# Streamlit App
 # =====================
-st.set_page_config(page_title="VBA2PyGen", layout="wide", initial_sidebar_state="expanded")
-st.markdown(
-    """
-    <style>
-        body { background-color: #0e1117; color: #c7d5e0; }
-        .stTextArea textarea, .stTextInput input { background-color: #1e222d; color: #c7d5e0; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-st.title("VBA2PyGen")
-st.markdown("Upload your Excel file with VBA macros, and let the AI convert them to Python step by step! 🚀")
+st.set_page_config(page_title="VBA2PyGen with Auto-Fix", layout="wide")
+st.markdown("""
+<style>
+  body {background:#0e1117; color:#c7d5e0}
+  .stTextArea textarea, .stTextInput input {background:#1e222d; color:#c7d5e0}
+</style>
+""", unsafe_allow_html=True)
+st.title("VBA2PyGen with Auto-Fix")
+st.markdown("Upload your Excel (xlsm/xlsb/xls) and let AI convert & auto-correct the Python code.")
 progress = st.progress(0)
 
-# === File uploader + reset logic ===
-uploaded_file = st.file_uploader("Upload your Excel file", type=["xlsm", "xlsb", "xls"])
-if uploaded_file is None:
-    for key in ("generated_code", "base_name"):
-        if key in st.session_state:
-            del st.session_state[key]
-    st.info("Please upload an Excel file to start conversion.")
+uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm","xlsb","xls"])
+if not uploaded_file:
+    st.session_state.pop("generated_code", None)
+    st.session_state.pop("base_name", None)
+    st.info("Please upload a file to continue.")
     st.stop()
 
-# Initialize session state
 if "generated_code" not in st.session_state:
     st.session_state["generated_code"] = None
-if "base_name" not in st.session_state:
     st.session_state["base_name"] = None
 
-# Run conversion pipeline once per upload
 if st.session_state["generated_code"] is None:
-    # Preserve macros for extraction
     suffix = os.path.splitext(uploaded_file.name)[1]
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(uploaded_file.getbuffer())
         tmp_path = tmp.name
-
     st.session_state["base_name"] = os.path.splitext(uploaded_file.name)[0]
-
     graph = build_graph()
-    initial_state: VBAState = {"file_path": tmp_path}
-    for state in graph.stream(initial_state):
-        final_state = state
-
-    result = final_state.get("generate_python_code", {}).get("generated_code")
-    if result:
-        st.session_state["generated_code"] = result
-        st.success("✅ Conversion completed!")
-    else:
-        st.error("No generated code found. Please check the previous steps.")
+    for state in graph.stream({"file_path": tmp_path}):
+        final = state
+    st.success("✅ Conversion & Auto-Fix completed!")
 else:
-    st.success("✅ Conversion already completed!")
+    st.success("✅ Already processed.")
