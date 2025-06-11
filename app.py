@@ -23,7 +23,6 @@ Please write equivalent Python code that:
 - Does not create a real Excel PivotTable, and does not use any fake or unsupported APIs like openpyxl.worksheet.table.tables.Table.
 - Make sure all Python libraries used are valid and the code runs end-to-end.
 """,
-
     "pivot_chart": """I have the following VBA code that creates a Pivot Chart in Excel:\n{vba_code}
 Uses pandas to perform the same data summarization (as done by the PivotTable feeding the chart).
 Generates a chart that visually represents the same data, using a real Python charting library like matplotlib, seaborn, or plotly.
@@ -32,7 +31,6 @@ Saves the resulting chart to an image file (PNG/JPG) or embeds it into a new she
 Avoid using any non-existent Excel chart APIs in openpyxl or other libraries.
 Make sure all code is real, valid, and executable with standard Python libraries. Do not use functions like (ws.clear_rows())
 """,
-
     "user_form": """I have the following VBA code that creates and handles a UserForm in Excel:\n{vba_code}
 Please generate equivalent Python code that:
 - Replicates the logic and UI flow of the UserForm.
@@ -42,7 +40,6 @@ Do not use fake or unsupported libraries or UI frameworks like (from openpyxl.pi
 Ensure the code uses only real, valid Python functions and libraries that exist.
 The Python script should be self-contained and executable, and replicate the VBA UserForm’s functionality as closely as possible.
 """,
-
     "formula": """I have the following VBA or Excel formula-based code:\n{vba_code}
 Please generate equivalent Python code that:
 - Replicates the same logic and calculations performed by the formulas.
@@ -53,7 +50,6 @@ The goal is to get the same results as Excel would, but entirely in Python.
 Do not embed Excel formulas into the cells, but instead compute the result in Python and write the final value back to Excel.
 Make sure all code uses valid Python syntax and libraries that actually exist.
 """,
-
     "normal_operations": """I have the following VBA code that performs normal Excel operations (like inserting rows, copying values, deleting columns, formatting cells, renaming sheets, etc.):\n{vba_code}
 Please write equivalent Python code that:
 - Performs the same operations using valid Python libraries like openpyxl or pandas.
@@ -148,7 +144,6 @@ def fix_code_with_ai(original: str, errors: list[str]) -> str:
     acc = ""
     for chunk in stream_claude(prompt):
         acc += chunk
-    # extract code block
     if "```python" in acc:
         s = acc.find("```python") + len("```python")
         e = acc.find("```", s)
@@ -178,8 +173,8 @@ def extract_vba(state: VBAState) -> VBAState:
 def categorize_vba(state: VBAState) -> VBAState:
     st.subheader("Step 2: Categorizing VBA code")
     prompt = (
-        "Classify the following VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. "
-        "Return only the category.\n\n" + state["vba_code"]
+        "Classify the following VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n"
+        + state["vba_code"]
     )
     cat = "".join(stream_claude(prompt)).strip().lower()
     state["category"] = cat if cat in PROMPTS else "normal_operations"
@@ -210,7 +205,7 @@ def generate_python_code(state: VBAState) -> VBAState:
     return state
 
 def verify_code(state: VBAState) -> VBAState:
-    st.subheader("Step 5: Verifying & fixing code")
+    st.subheader("Step 5: Verifying, fixing & finalizing code")
     code = state.get("generated_code", "")
     errors = verify_local_code(code)
     if errors:
@@ -227,18 +222,26 @@ def verify_code(state: VBAState) -> VBAState:
             st.stop()
         else:
             st.success("✅ Corrected code passes local checks.")
+        code = fixed
     else:
         st.success("✅ Local checks passed.")
-    st.subheader("AI Cross-Verification")
+    # AI cross-verification & auto-fix
     verify_prompt = (
-        "You are a code reviewer. Analyze the following Python code and confirm it is valid, uses only real importable libraries, "
-        "and fulfills the requested task. List any issues.\n```python\n"
-        + state["generated_code"] + "\n```"
+        "You are a code reviewer. The following Python code is final: verify it is valid, uses only real importable libraries, fulfills the requested task, and if there are any issues, provide a fully corrected version. Respond with only the corrected code in a code block.\n```python\n"
+        + code + "\n```"
     )
-    feedback = ""
+    acc = ""
     for chunk in stream_claude(verify_prompt):
-        feedback += chunk
-    st.markdown(feedback)
+        acc += chunk
+    if "```python" in acc:
+        s = acc.find("```python") + len("```python")
+        e = acc.find("```", s)
+        final_code = acc[s:e].strip()
+    else:
+        final_code = acc.strip()
+    state["generated_code"] = final_code
+    st.subheader("Final Corrected Code")
+    st.code(final_code, language="python")
     progress.progress(100)
     return state
 
