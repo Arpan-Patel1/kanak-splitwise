@@ -21,11 +21,11 @@ Please write equivalent Python code that:
 - Uses pandas to perform the summary.
 - Saves the resulting table into a sheet in the same Excel file using pandas.ExcelWriter.
 - Uses only real, supported APIs.
-Ensure the code runs end-to-end and the basic structure of the Python code remains unchanged.""",
-    # Add other prompt entries similarly...
+Ensure the code runs end-to-end and keep the basic structure unchanged.""",
+    # ... other categories ...
     "normal_operations": """I have the following VBA code that performs normal Excel operations:\n{vba_code}
 Please write equivalent Python code using openpyxl or pandas to replicate the logic.
-Ensure the code runs end-to-end and the basic structure of the Python code remains unchanged."""
+Ensure the code runs end-to-end and keep the basic structure unchanged."""
 }
 
 # =====================
@@ -91,82 +91,85 @@ def save_uploaded_file(uploaded_file) -> tuple[str, str]:
 # Step functions
 # =====================
 def extract_vba(state: VBAState) -> VBAState:
-    st.subheader("Step 1: Extracting VBA code")
-    try:
-        parser = VBA_Parser(state["file_path"])
-    except Exception as e:
-        st.error(f"Parse error: {e}")
-        st.stop()
-    modules = [code.strip() for _, _, _, code in parser.extract_macros() if code.strip()]
-    if not modules:
-        st.error("No VBA macros found.")
-        st.stop()
-    state["vba_code"] = "\n\n".join(modules)
-    with st.expander("VBA Code"):
-        st.text_area("VBA macros", state["vba_code"], height=300)
+    with st.spinner("Extracting VBA..."):
+        try:
+            parser = VBA_Parser(state["file_path"])
+        except Exception as e:
+            st.error(f"Parse error: {e}")
+            st.stop()
+        modules = [code.strip() for _, _, _, code in parser.extract_macros() if code.strip()]
+        if not modules:
+            st.error("No VBA macros found.")
+            st.stop()
+        state["vba_code"] = "\n\n".join(modules)
+    st.subheader("Step 1: Extracted VBA code")
+    st.text_area("VBA macros", state["vba_code"], height=200)
     progress.progress(20)
     return state
 
+
 def categorize_vba(state: VBAState) -> VBAState:
-    st.subheader("Step 2: Categorizing VBA code")
-    prompt = (
-        "Classify the following VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n"
-        + state["vba_code"]
-    )
-    cat = "".join(stream_claude(prompt)).strip().lower()
-    state["category"] = cat if cat in PROMPTS else "normal_operations"
-    st.success(f"Category: {state['category']}")
+    with st.spinner("Categorizing VBA..."):
+        prompt = (
+            "Classify the VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n"
+            + state["vba_code"]
+        )
+        cat = "".join(stream_claude(prompt)).strip().lower()
+        state["category"] = cat if cat in PROMPTS else "normal_operations"
+    st.subheader("Step 2: Category detected")
+    st.write(state["category"])
     progress.progress(40)
     return state
 
+
 def build_prompt(state: VBAState) -> VBAState:
-    st.subheader("Step 3: Building AI prompt")
+    st.subheader("Step 3: AI Prompt")
     state["final_prompt"] = PROMPTS[state["category"]].format(vba_code=state["vba_code"])
-    with st.expander("AI Prompt"):
-        st.text_area("Prompt", state["final_prompt"], height=200)
+    st.text_area("Prompt", state["final_prompt"], height=150)
     progress.progress(60)
     return state
 
+
 def generate_python_code(state: VBAState) -> VBAState:
-    st.subheader("Step 4: Generating Python code")
-    full = "".join(stream_claude(state["final_prompt"]))
-    code = full
-    if "```python" in full:
-        s = full.find("```python") + len("```python")
-        e = full.find("```", s)
-        code = full[s:e].strip()
-    with st.expander("Generated Code"):
-        st.code(code, language="python")
-    progress.progress(80)
+    with st.spinner("Generating Python code..."):
+        full = "".join(stream_claude(state["final_prompt"]))
+        code = full
+        if "```python" in full:
+            s = full.find("```python") + len("```python")
+            e = full.find("```", s)
+            code = full[s:e].strip()
     state["generated_code"] = code
+    st.subheader("Step 4: Generated Code")
+    st.text_area("Code before fix", code, height=200)
+    progress.progress(80)
     return state
+
 
 def verify_and_fix_code(state: VBAState) -> VBAState:
     st.subheader("Step 5: AI Verify & Fix")
     code = state.get("generated_code", "")
     xlsx_file = os.path.basename(st.session_state['xlsx_path'])
 
-    # Provide VBA macro for context
-    vba_context = state["vba_code"]
-
-    # 1) Ask AI to list fixes based on functionality and imports
+    # Summarize fixes
     summary_prompt = (
-        "Given the VBA macros:\n" + vba_context +
-        "\n\nAnd the generated Python code, list pointwise what you will fix to ensure imports are valid, syntax is correct, and functionality matches the VBA. "
-        f"Also replace any Excel path with '{xlsx_file}'.\n```python\n{code}\n```"
+        "Given the VBA macros below, and the generated Python code, list pointwise the fixes you will apply to ensure valid imports, syntax, functionality, and replace any Excel path with '"
+        + xlsx_file + "'. Then do not change structure." +
+        "\n\nVBA:\n" + state["vba_code"] + "\n\nCode:\n```python\n" + code + "\n```"
     )
     fixes = ""
-    for chunk in stream_claude(summary_prompt): fixes += chunk
+    with st.spinner("Summarizing fixes..."):
+        for chunk in stream_claude(summary_prompt): fixes += chunk
     st.markdown("**Planned Fixes:**")
-    st.markdown(fixes)
+    st.write(fixes)
 
-    # 2) AI applies fixes
+    # Apply fixes
     fix_prompt = (
-        "Now provide the corrected Python code implementing those fixes, preserving the original structure. "
-        f"Use only real libraries and replace file paths with '{xlsx_file}'.\n```python\n{code}\n```"
+        "Now provide the corrected Python code implementing those fixes, preserving basic structure, using only real libraries, and replacing paths with '"
+        + xlsx_file + "'. Respond with only the code.\n" + fixes
     )
     acc = ""
-    for chunk in stream_claude(fix_prompt): acc += chunk
+    with st.spinner("Applying fixes..."):
+        for chunk in stream_claude(fix_prompt): acc += chunk
     if "```python" in acc:
         s = acc.find("```python") + len("```python")
         e = acc.find("```", s)
@@ -175,8 +178,7 @@ def verify_and_fix_code(state: VBAState) -> VBAState:
         final_code = acc.strip()
 
     state["generated_code"] = final_code
-    st.subheader("Final Corrected Code")
-    st.code(final_code, language="python")
+    st.expander("Final Corrected Code").code(final_code, language="python")
 
     # Save final Python next to xlsx
     py_path = os.path.splitext(st.session_state['xlsx_path'])[0] + ".py"
@@ -191,35 +193,29 @@ def verify_and_fix_code(state: VBAState) -> VBAState:
 # =====================
 
 def build_graph():
+    steps = [extract_vba, categorize_vba, build_prompt, generate_python_code, verify_and_fix_code]
     g = StateGraph(VBAState)
-    steps = [
-        ("extract_vba", extract_vba),
-        ("categorize_vba", categorize_vba),
-        ("build_prompt", build_prompt),
-        ("generate_python_code", generate_python_code),
-        ("verify_and_fix_code", verify_and_fix_code)
-    ]
-    for name, fn in steps:
-        g.add_node(name, fn)
-    g.set_entry_point(steps[0][0])
-    for i in range(len(steps)-1):
-        g.add_edge(steps[i][0], steps[i+1][0])
-    g.add_edge(steps[-1][0], END)
+    for fn in steps:
+        g.add_node(fn.__name__, fn)
+    g.set_entry_point(steps[0].__name__)
+    for a, b in zip(steps, steps[1:]):
+        g.add_edge(a.__name__, b.__name__)
+    g.add_edge(steps[-1].__name__, END)
     return g.compile()
 
 # =====================
 # Streamlit App
 # =====================
 
-st.set_page_config(page_title="VBA2PyGen AI-Fix", layout="wide")
+st.set_page_config(page_title="VBA2PyGen", layout="wide")
 st.markdown("""
 <style>
- body {background:#0e1117; color:#c7d5e0}
- .stTextArea textarea, .stTextInput input {background:#1e222d; color:#c7d5e0}
+  body {background:#0e1117; color:#c7d5e0}
+  .stTextArea textarea, .stTextInput input {background:#1e222d; color:#c7d5e0}
 </style>
 """, unsafe_allow_html=True)
-st.title("VBA2PyGen with Context-Aware AI Fix")
-st.markdown("Upload your Excel file; AI will convert, review against the original VBA, list fixes, apply them, and replace paths.")
+st.title("VBA2PyGen with AI Auto-Fix")
+st.markdown("Upload an Excel file; AI will convert, summarize fixes, apply them, and replace paths while preserving structure.")
 progress = st.progress(0)
 
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm","xlsb","xls"])
@@ -230,9 +226,9 @@ if not uploaded_file:
     st.stop()
 
 # Save and strip macros
-txlsx_path, base_name = save_uploaded_file(uploaded_file)
-st.session_state['xlsx_path'] = txlsx_path
-st.markdown(f"**Macro-stripped copy:** `{txlsx_path}`")
+xlsx_path, base_name = save_uploaded_file(uploaded_file)
+st.session_state['xlsx_path'] = xlsx_path
+st.markdown(f"**Macro-stripped copy:** `{xlsx_path}`")
 
 if "generated_code" not in st.session_state:
     st.session_state["generated_code"] = None
@@ -242,11 +238,9 @@ if st.session_state["generated_code"] is None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(uploaded_file.getbuffer())
         tmp_path = tmp.name
-
-    graph = build_graph()
-    for state in graph.stream({"file_path": tmp_path}):
+    compiled = build_graph()
+    for state in compiled.stream({"file_path": tmp_path}):
         final = state
-
-    st.success("✅ Conversion & AI Contextual Fix completed!")
+    st.success("✅ Conversion & AI Auto-Fix completed!")
 else:
     st.success("✅ Already processed.")
