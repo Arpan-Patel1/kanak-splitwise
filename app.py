@@ -21,11 +21,11 @@ Please write equivalent Python code that:
 - Uses pandas to perform the summary.
 - Saves the resulting table into a sheet in the same Excel file using pandas.ExcelWriter.
 - Uses only real, supported APIs.
-Ensure the code runs end-to-end and keep the basic structure of the generated Python code unchanged.""",
+Ensure the code runs end-to-end and the basic structure of the Python code remains unchanged.""",
     # Add other prompt entries similarly...
     "normal_operations": """I have the following VBA code that performs normal Excel operations:\n{vba_code}
 Please write equivalent Python code using openpyxl or pandas to replicate the logic.
-Ensure the code runs end-to-end and keep the basic structure of the generated Python code unchanged."""
+Ensure the code runs end-to-end and the basic structure of the Python code remains unchanged."""
 }
 
 # =====================
@@ -107,11 +107,10 @@ def extract_vba(state: VBAState) -> VBAState:
     progress.progress(20)
     return state
 
-
 def categorize_vba(state: VBAState) -> VBAState:
     st.subheader("Step 2: Categorizing VBA code")
     prompt = (
-        "Classify the VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n"
+        "Classify the following VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n"
         + state["vba_code"]
     )
     cat = "".join(stream_claude(prompt)).strip().lower()
@@ -120,7 +119,6 @@ def categorize_vba(state: VBAState) -> VBAState:
     progress.progress(40)
     return state
 
-
 def build_prompt(state: VBAState) -> VBAState:
     st.subheader("Step 3: Building AI prompt")
     state["final_prompt"] = PROMPTS[state["category"]].format(vba_code=state["vba_code"])
@@ -128,7 +126,6 @@ def build_prompt(state: VBAState) -> VBAState:
         st.text_area("Prompt", state["final_prompt"], height=200)
     progress.progress(60)
     return state
-
 
 def generate_python_code(state: VBAState) -> VBAState:
     st.subheader("Step 4: Generating Python code")
@@ -144,31 +141,32 @@ def generate_python_code(state: VBAState) -> VBAState:
     state["generated_code"] = code
     return state
 
-
 def verify_and_fix_code(state: VBAState) -> VBAState:
-    st.subheader("Step 5: AI Verify & Fix Libraries/Syntax")
+    st.subheader("Step 5: AI Verify & Fix")
     code = state.get("generated_code", "")
     xlsx_file = os.path.basename(st.session_state['xlsx_path'])
 
-    # AI lists planned fixes while preserving code structure
+    # Provide VBA macro for context
+    vba_context = state["vba_code"]
+
+    # 1) Ask AI to list fixes based on functionality and imports
     summary_prompt = (
-        "List pointwise what you will fix in this Python code, but keep the basic structure and functionality unchanged. "
-        f"Replace any Excel path with '{xlsx_file}'.\n```python\n{code}\n```"
+        "Given the VBA macros:\n" + vba_context +
+        "\n\nAnd the generated Python code, list pointwise what you will fix to ensure imports are valid, syntax is correct, and functionality matches the VBA. "
+        f"Also replace any Excel path with '{xlsx_file}'.\n```python\n{code}\n```"
     )
     fixes = ""
-    for chunk in stream_claude(summary_prompt):
-        fixes += chunk
+    for chunk in stream_claude(summary_prompt): fixes += chunk
     st.markdown("**Planned Fixes:**")
     st.markdown(fixes)
 
-    # AI applies fixes, replacing file paths
+    # 2) AI applies fixes
     fix_prompt = (
-        "Now provide the corrected Python code implementing those fixes, preserving the original structure and functionality, "
-        f"using only real libraries and replacing file paths with '{xlsx_file}'. Respond with only the code block.\n" + fixes
+        "Now provide the corrected Python code implementing those fixes, preserving the original structure. "
+        f"Use only real libraries and replace file paths with '{xlsx_file}'.\n```python\n{code}\n```"
     )
     acc = ""
-    for chunk in stream_claude(fix_prompt):
-        acc += chunk
+    for chunk in stream_claude(fix_prompt): acc += chunk
     if "```python" in acc:
         s = acc.find("```python") + len("```python")
         e = acc.find("```", s)
@@ -203,7 +201,7 @@ def build_graph():
     ]
     for name, fn in steps:
         g.add_node(name, fn)
-    g.set_entry_point("extract_vba")
+    g.set_entry_point(steps[0][0])
     for i in range(len(steps)-1):
         g.add_edge(steps[i][0], steps[i+1][0])
     g.add_edge(steps[-1][0], END)
@@ -213,15 +211,15 @@ def build_graph():
 # Streamlit App
 # =====================
 
-st.set_page_config(page_title="VBA2PyGen", layout="wide")
+st.set_page_config(page_title="VBA2PyGen AI-Fix", layout="wide")
 st.markdown("""
 <style>
-  body {background:#0e1117; color:#c7d5e0}
-  .stTextArea textarea, .stTextInput input {background:#1e222d; color:#c7d5e0}
+ body {background:#0e1117; color:#c7d5e0}
+ .stTextArea textarea, .stTextInput input {background:#1e222d; color:#c7d5e0}
 </style>
 """, unsafe_allow_html=True)
-st.title("VBA2PyGen with AI Auto-Fix")
-st.markdown("Upload your Excel file and let AI convert, summarize fixes pointwise, fix code, and replace paths while preserving structure.")
+st.title("VBA2PyGen with Context-Aware AI Fix")
+st.markdown("Upload your Excel file; AI will convert, review against the original VBA, list fixes, apply them, and replace paths.")
 progress = st.progress(0)
 
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm","xlsb","xls"])
@@ -232,9 +230,9 @@ if not uploaded_file:
     st.stop()
 
 # Save and strip macros
-xlsx_path, base_name = save_uploaded_file(uploaded_file)
-st.session_state['xlsx_path'] = xlsx_path
-st.markdown(f"**Macro-stripped copy:** `{xlsx_path}`")
+txlsx_path, base_name = save_uploaded_file(uploaded_file)
+st.session_state['xlsx_path'] = txlsx_path
+st.markdown(f"**Macro-stripped copy:** `{txlsx_path}`")
 
 if "generated_code" not in st.session_state:
     st.session_state["generated_code"] = None
@@ -249,6 +247,6 @@ if st.session_state["generated_code"] is None:
     for state in graph.stream({"file_path": tmp_path}):
         final = state
 
-    st.success("✅ Conversion & AI Auto-Fix completed!")
+    st.success("✅ Conversion & AI Contextual Fix completed!")
 else:
     st.success("✅ Already processed.")
