@@ -1,7 +1,6 @@
 import os
 import json
 import tempfile
-import re
 from typing import TypedDict, Optional
 
 import openpyxl
@@ -160,38 +159,18 @@ def verify_and_fix_code(state: VBAState) -> VBAState:
     xlsx_file = os.path.basename(st.session_state['xlsx_path'])
     vba_context = state["vba_code"]
 
-    summary_prompt = (
-        "Your task is to verify and fix Python code that was generated from the following VBA macros:\n"
-        f"{vba_context}\n\n"
-        "The goal is to make the Python code behave exactly like the macro code.\n\n"
-        "Here is the generated Python code:\n"
-        f"```python\n{code}\n```\n\n"
-        f"The Excel file being used is named `{xlsx_file}`. All file paths must reference this exact file.\n\n"
-        "Now list, point by point, only the **required** corrections needed to:\n"
-        "- Ensure correct imports\n"
-        "- Fix syntax or logic errors\n"
-        "- Match the macro's behavior exactly\n"
-        "- Replace any invalid or non-existent Python functions or libraries with real ones\n\n"
-        "**Do not suggest style changes, formatting improvements, or extra enhancements.**\n"
-        "**Keep your changes tight. If a part of the code already works correctly, leave it unchanged.**\n"
-        "Only focus on what’s necessary to make the code executable and equivalent to the macro."
-    )
-    fixes = ""
-    with st.spinner("Summarizing fixes..."):
-        for chunk in stream_claude(summary_prompt):
-            fixes += chunk
-    with st.expander("Step 5: Planned Fixes"):
-        st.markdown(fixes)
-
     fix_prompt = (
-        "Now provide the corrected Python code that fixes the issues you just listed. "
-        "Make sure it matches the logic of the original VBA macros shown below, and preserves the structure of the previous Python code. "
-        f"Use only real libraries and replace file paths with '{xlsx_file}'.\n\n"
+        "Your task is to fix the following Python code so it matches the logic of the original VBA macros shown below.\n\n"
+        "Do not change anything that already works. Keep your changes minimal and tight.\n"
+        "Fix only broken imports, syntax issues, missing logic, or incorrect functionality.\n"
+        "Replace fake or non-existent functions with real ones from Python libraries.\n\n"
+        f"The Excel file to be used in the script is `{xlsx_file}` — make sure this file is used wherever needed.\n\n"
         f"VBA Macros:\n{vba_context}\n\n"
         f"Generated Python Code:\n```python\n{code}\n```"
     )
+
     acc = ""
-    with st.spinner("Applying fixes..."):
+    with st.spinner("Applying direct code fixes..."):
         for chunk in stream_claude(fix_prompt):
             acc += chunk
 
@@ -203,7 +182,7 @@ def verify_and_fix_code(state: VBAState) -> VBAState:
         final_code = acc.strip()
 
     state["generated_code"] = final_code
-    with st.expander("Step 6: Final Corrected Code"):
+    with st.expander("Step 5: Final Corrected Code"):
         st.code(final_code, language="python")
 
     py_path = os.path.splitext(st.session_state['xlsx_path'])[0] + ".py"
