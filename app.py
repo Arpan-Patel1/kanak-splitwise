@@ -11,9 +11,6 @@ import boto3
 from oletools.olevba import VBA_Parser
 from langgraph.graph import StateGraph, END
 
-# =====================
-# Define prompts dictionary
-# =====================
 PROMPTS = {
     "pivot_table": """I have the following VBA code that creates a Pivot Table in Excel:\n{vba_code}
     Please write equivalent Python code that:
@@ -30,8 +27,7 @@ PROMPTS = {
     The chart type should match what’s used in the VBA (e.g., column chart, line chart, pie chart, etc.).
     Avoid using any non-existent Excel chart APIs in openpyxl or other libraries.
     Make sure all code is real, valid, and executable with standard Python libraries. Do not use functions like (ws.clear_rows())
-    """
-,
+    """,
 
     "user_form": """I have the following VBA code that creates and handles a UserForm in Excel: \n{vba_code}
     Please generate equivalent Python code that:
@@ -54,7 +50,6 @@ PROMPTS = {
     Make sure all code uses valid Python syntax and libraries that actually exist.
     """,
 
-
     "normal_operations": """I have the following VBA code that performs normal Excel operations (like inserting rows, copying values, deleting columns, formatting cells, renaming sheets, etc.):\n{vba_code}
     Please write equivalent Python code that:
     Performs the same operations using valid Python libraries like openpyxl or pandas.
@@ -66,14 +61,8 @@ PROMPTS = {
     """
 }
 
-# =====================
-# AWS Bedrock client
-# =====================
 bedrock = boto3.client("bedrock-runtime")
 
-# =====================
-# Stream Claude API
-# =====================
 def stream_claude(prompt: str):
     try:
         payload = {
@@ -81,8 +70,8 @@ def stream_claude(prompt: str):
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 4000,
             "temperature": 0,
-            "top_p": 0.9,
-            "top_k": 250,
+            "top_p": 1.0,
+            "top_k": 1,
         }
         resp = bedrock.invoke_model_with_response_stream(
             modelId=(
@@ -100,9 +89,6 @@ def stream_claude(prompt: str):
         st.error(f"Claude error: {e}")
         st.stop()
 
-# =====================
-# State type
-# =====================
 class VBAState(TypedDict):
     file_path: Optional[str]
     vba_code: Optional[str]
@@ -110,9 +96,6 @@ class VBAState(TypedDict):
     final_prompt: Optional[str]
     generated_code: Optional[str]
 
-# =====================
-# Save & strip macros
-# =====================
 def save_uploaded_file(uploaded_file) -> tuple[str, str]:
     path = os.path.join(os.getcwd(), uploaded_file.name)
     with open(path, "wb") as f:
@@ -125,9 +108,6 @@ def save_uploaded_file(uploaded_file) -> tuple[str, str]:
         return no_macro, os.path.splitext(uploaded_file.name)[0]
     return path, os.path.splitext(uploaded_file.name)[0]
 
-# =====================
-# Step functions
-# =====================
 def extract_vba(state: VBAState) -> VBAState:
     with st.spinner("Extracting VBA..."):
         parser = VBA_Parser(state["file_path"])
@@ -140,7 +120,6 @@ def extract_vba(state: VBAState) -> VBAState:
         st.code(state["vba_code"], language="text")
     progress.progress(20)
     return state
-
 
 def categorize_vba(state: VBAState) -> VBAState:
     with st.spinner("Categorizing code..."):
@@ -155,14 +134,12 @@ def categorize_vba(state: VBAState) -> VBAState:
     progress.progress(40)
     return state
 
-
 def build_prompt(state: VBAState) -> VBAState:
     state["final_prompt"] = PROMPTS[state["category"]].format(vba_code=state["vba_code"])
     with st.expander("Step 3: AI Prompt"):
         st.code(state["final_prompt"], language="text")
     progress.progress(60)
     return state
-
 
 def generate_python_code(state: VBAState) -> VBAState:
     with st.spinner("Generating Python code..."):
@@ -178,12 +155,11 @@ def generate_python_code(state: VBAState) -> VBAState:
     progress.progress(80)
     return state
 
-
 def verify_and_fix_code(state: VBAState) -> VBAState:
     code = state.get("generated_code", "")
     xlsx_file = os.path.basename(st.session_state['xlsx_path'])
     vba_context = state["vba_code"]
-    # AI lists fixes
+
     summary_prompt = (
         "Given the VBA macros:\n" + vba_context +
         "\n\nAnd the generated Python code, list pointwise what you will fix to ensure imports are valid, syntax is correct, and functionality matches the VBA. "
@@ -191,37 +167,41 @@ def verify_and_fix_code(state: VBAState) -> VBAState:
     )
     fixes = ""
     with st.spinner("Summarizing fixes..."):
-        for chunk in stream_claude(summary_prompt): fixes += chunk
+        for chunk in stream_claude(summary_prompt):
+            fixes += chunk
     with st.expander("Step 5: Planned Fixes"):
         st.markdown(fixes)
-    # AI applies fixes
+
     fix_prompt = (
-        "Now provide the corrected Python code implementing those fixes, preserving the original structure. "
-        f"Use only real libraries and replace file paths with '{xlsx_file}'.\n```python\n{code}\n```"
+        "Now provide the corrected Python code that fixes the issues you just listed. "
+        "Make sure it matches the logic of the original VBA macros shown below, and preserves the structure of the previous Python code. "
+        f"Use only real libraries and replace file paths with '{xlsx_file}'.\n\n"
+        f"VBA Macros:\n{vba_context}\n\n"
+        f"Generated Python Code:\n```python\n{code}\n```"
     )
     acc = ""
     with st.spinner("Applying fixes..."):
-        for chunk in stream_claude(fix_prompt): acc += chunk
+        for chunk in stream_claude(fix_prompt):
+            acc += chunk
+
     if "```python" in acc:
         s = acc.find("```python") + len("```python")
         e = acc.find("```", s)
         final_code = acc[s:e].strip()
     else:
         final_code = acc.strip()
+
     state["generated_code"] = final_code
     with st.expander("Step 6: Final Corrected Code"):
         st.code(final_code, language="python")
-    # Save
+
     py_path = os.path.splitext(st.session_state['xlsx_path'])[0] + ".py"
     with open(py_path, "w") as f:
         f.write(final_code)
+
     st.markdown(f"**Saved Python at:** `{py_path}`")
     progress.progress(100)
     return state
-
-# =====================
-# Build StateGraph
-# =====================
 
 def build_graph():
     steps = [extract_vba, categorize_vba, build_prompt, generate_python_code, verify_and_fix_code]
@@ -233,10 +213,6 @@ def build_graph():
         g.add_edge(a.__name__, b.__name__)
     g.add_edge(steps[-1].__name__, END)
     return g.compile()
-
-# =====================
-# Streamlit App
-# =====================
 
 st.set_page_config(page_title="VBA2PyGen", layout="wide")
 st.markdown("""
@@ -256,7 +232,6 @@ if not uploaded_file:
     st.info("Please upload a file to continue.")
     st.stop()
 
-# Save & strip macros
 xlsx_path, base_name = save_uploaded_file(uploaded_file)
 st.session_state['xlsx_path'] = xlsx_path
 st.markdown(f"**Macro-stripped copy:** `{xlsx_path}`")
