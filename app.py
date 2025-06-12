@@ -161,9 +161,20 @@ def verify_and_fix_code(state: VBAState) -> VBAState:
     vba_context = state["vba_code"]
 
     summary_prompt = (
-        "Given the VBA macros:\n" + vba_context +
-        "\n\nAnd the generated Python code, list pointwise what you will fix to ensure imports are valid, syntax is correct, and functionality matches the VBA. "
-        f"Also replace any Excel path with '{xlsx_file}'.\n```python\n{code}\n```"
+        "Your task is to verify and fix Python code that was generated from the following VBA macros:\n"
+        f"{vba_context}\n\n"
+        "The goal is to make the Python code behave exactly like the macro code.\n\n"
+        "Here is the generated Python code:\n"
+        f"```python\n{code}\n```\n\n"
+        f"The Excel file being used is named `{xlsx_file}`. All file paths must reference this exact file.\n\n"
+        "Now list, point by point, only the **required** corrections needed to:\n"
+        "- Ensure correct imports\n"
+        "- Fix syntax or logic errors\n"
+        "- Match the macro's behavior exactly\n"
+        "- Replace any invalid or non-existent Python functions or libraries with real ones\n\n"
+        "**Do not suggest style changes, formatting improvements, or extra enhancements.**\n"
+        "**Keep your changes tight. If a part of the code already works correctly, leave it unchanged.**\n"
+        "Only focus on what’s necessary to make the code executable and equivalent to the macro."
     )
     fixes = ""
     with st.spinner("Summarizing fixes..."):
