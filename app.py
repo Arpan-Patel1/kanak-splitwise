@@ -218,3 +218,39 @@ if state and not do_process:
         st.code(PROMPTS[state['category']].format(vba_code=state['vba_code']), language="text")
     with st.expander("Generated Python Code"):
         st.code(state['py_code'], language="python")
+
+# Voting callbacks
+
+def upvote():
+    # Insert and update feedback on upvote
+    rec_id = insert_record(
+        file_id,
+        state['vba_code'],
+        state['category'],
+        state['embedding'],
+        state['py_code'],
+        1
+    )
+    if state.get('match'):
+        update_feedback(state['match']['id'], 1)
+    st.session_state['voted'] = True
+
+
+def downvote():
+    # Update feedback on downvote only
+    if state.get('match'):
+        update_feedback(state['match']['id'], -1)
+    st.session_state['voted'] = True
+
+# Render buttons and disable after vote
+col1, col2 = st.columns(2)
+col1.button(
+    "👍 Helpful",
+    on_click=upvote,
+    disabled=st.session_state['voted']
+)
+col2.button(
+    "👎 Not Helpful",
+    on_click=downvote,
+    disabled=st.session_state['voted']
+)
