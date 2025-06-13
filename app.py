@@ -17,8 +17,7 @@ EMBED_MODEL_ID = "amazon.titan-embed-text-v2:0"
 DB_PATH = "macro_embeddings.db"
 
 PROMPTS = {
-    "pivot_table": """I have the following VBA code that creates a Pivot Table in Excel:\n{vba_code}
-Please write equivalent Python code that:\nProduces the same summarized data the pivot table would show (e.g., group by fields, aggregation like SUM, COUNT, AVERAGE).\nUses pandas to perform the summary using pivot_table() or groupby().\nSaves the resulting table into a sheet where it is suppose to be in the same Excel file using pandas.ExcelWriter or openpyxl.\nDoes not create a real Excel PivotTable, and does not use any fake or unsupported APIs like openpyxl.worksheet.table.tables.Table.\nMake sure all Python libraries used are valid and the code runs end-to-end.""",
+    "pivot_table": """I have the following VBA code that creates a Pivot Table in Excel:\n{vba_code}\nPlease write equivalent Python code that:\nProduces the same summarized data the pivot table would show (e.g., group by fields, aggregation like SUM, COUNT, AVERAGE).\nUses pandas to perform the summary using pivot_table() or groupby().\nSaves the resulting table into a sheet where it is suppose to be in the same Excel file using pandas.ExcelWriter or openpyxl.\nDoes not create a real Excel PivotTable, and does not use any fake or unsupported APIs like openpyxl.worksheet.table.tables.Table.\nMake sure all Python libraries used are valid and the code runs end-to-end.""",
     "pivot_chart": "...",
     "user_form": "...",
     "formula": "...",
@@ -127,7 +126,7 @@ if not uploaded_file:
 if "voted" not in st.session_state:
     st.session_state["voted"] = False
 
-if not st.session_state["voted"]:
+if uploaded_file and not st.session_state["voted"]:
     suffix = os.path.splitext(uploaded_file.name)[1]
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(uploaded_file.getbuffer())
@@ -151,7 +150,7 @@ if not st.session_state["voted"]:
         match = find_best_match(state["embedding"])
         state["match"] = match
         if match:
-            st.markdown(f"**Reference Found:** `{match['name']}` — `{round(match['score']*100, 2)}%`)" )
+            st.markdown(f"**Reference Found:** `{match['name']}` — `{round(match['score']*100, 2)}%`)")
             with st.expander("Matched VBA Macro"):
                 st.code(match['vba_macro'], language="vb")
             with st.expander("Matched Python Code"):
