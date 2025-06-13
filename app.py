@@ -160,13 +160,15 @@ def verify_and_fix_code(state: VBAState) -> VBAState:
     vba_context = state["vba_code"]
 
     fix_prompt = (
-        "Your task is to fix the following Python code so it matches the logic of the original VBA macros shown below.\n\n"
-        "Do not change anything that already works. Keep your changes minimal and tight.\n"
-        "Fix only broken imports, syntax issues, missing logic, or incorrect functionality.\n"
-        "Replace fake or non-existent functions with real ones from Python libraries.\n\n"
-        f"The Excel file to be used in the script is `{xlsx_file}` — make sure this file is used wherever needed.\n\n"
+        "you are a Python Code validation agent."
+        "You are given:\n"
         f"VBA Macros:\n{vba_context}\n\n"
         f"Generated Python Code:\n```python\n{code}\n```"
+        "Only fix the python code if it is broken or does NOT match the macro logic."
+        "If the code is already correct, return it as-is."
+        "Do NOT optimize, reformat, remane, or alter logic that already works."
+        f"Use only real libraries and replace file paths with '{xlsx_file}'.\n\n"
+        "Only return corrected code - no explaination."
     )
 
     acc = ""
