@@ -31,11 +31,10 @@ bedrock = boto3.client("bedrock-runtime")
 
 def get_embedding(text: str) -> list[float]:
     payload = {
-        "inputText": text,
-        "embeddingConfig": {"outputEmbeddingLength": 1536}
+        "inputText": text
     }
     response = bedrock.invoke_model(
-        modelId="amazon.titan-embed-text-v2",
+        modelId="amazon.titan-embed-text-v2:0",  # ✅ Correct ID
         contentType="application/json",
         accept="application/json",
         body=json.dumps(payload),
