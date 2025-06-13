@@ -18,213 +18,188 @@ DB_PATH = "macro_embeddings.db"
 
 PROMPTS = {
     "pivot_table": """I have the following VBA code that creates a Pivot Table in Excel:\n{vba_code}\nPlease write equivalent Python code that:\nProduces the same summarized data the pivot table would show (e.g., group by fields, aggregation like SUM, COUNT, AVERAGE).\nUses pandas to perform the summary using pivot_table() or groupby().\nSaves the resulting table into a sheet where it is suppose to be in the same Excel file using pandas.ExcelWriter or openpyxl.\nDoes not create a real Excel PivotTable, and does not use any fake or unsupported APIs like openpyxl.worksheet.table.tables.Table.\nMake sure all Python libraries used are valid and the code runs end-to-end.""",
-    "pivot_chart": "...",
-    "user_form": "...",
-    "formula": "...",
-    "normal_operations": "..."
+    "pivot_chart": "I have the following VBA code that creates a Pivot Chart in Excel:\n{vba_code}\nPlease generate equivalent Python code that uses pandas for summarization and plotly/matplotlib for the chart. Ensure it matches the VBA chart type and runs end-to-end.",
+    "user_form": "I have the following VBA code that creates a UserForm:\n{vba_code}\nGenerate equivalent Python code using Tkinter or PyQt5, capturing user input and writing to Excel via pandas/openpyxl.",
+    "formula": "I have the following VBA or Excel formula logic:\n{vba_code}\nWrite Python code using pandas/numpy to compute the same results, and save back to Excel.",
+    "normal_operations": "I have the following VBA code performing normal Excel operations:\n{vba_code}\nWrite equivalent Python using openpyxl or pandas for sheet structure and value operations, including formatting via openpyxl.styles."
 }
 
 # === DB Init ===
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS macro_matches (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT,
-                vba_macro TEXT,
-                category TEXT,
-                embedding TEXT,
-                generated_code TEXT,
-                feedback INTEGER,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS macro_matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            vba_macro TEXT,
+            category TEXT,
+            embedding TEXT,
+            generated_code TEXT,
+            feedback INTEGER,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """
+    )
+    conn.close()
 init_db()
 
-# === Embedding & Matching ===
+# === Helpers ===
 def get_embedding(text: str):
     if len(text) > 25000:
         text = text[:25000]
     payload = {"inputText": text}
-    response = bedrock.invoke_model(
+    resp = bedrock.invoke_model(
         modelId=EMBED_MODEL_ID,
         contentType="application/json",
         accept="application/json",
         body=json.dumps(payload),
     )
-    return json.loads(response["body"].read())["embedding"]
+    return json.loads(resp["body"].read())["embedding"]
 
 def cosine_similarity(v1, v2):
-    v1, v2 = np.array(v1), np.array(v2)
-    return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+    a, b = np.array(v1), np.array(v2)
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
-def find_best_match(new_embedding, threshold=0.5):
-    best_score = -1
-    best_row = None
-    with sqlite3.connect(DB_PATH) as conn:
-        for row in conn.execute("SELECT id, name, vba_macro, embedding, generated_code FROM macro_matches"):
-            try:
-                old = json.loads(row[3])
-                sim = cosine_similarity(new_embedding, old)
-                if sim > best_score:
-                    best_score = sim
-                    best_row = {
-                        "id": row[0],
-                        "name": row[1],
-                        "vba_macro": row[2],
-                        "embedding": old,
-                        "generated_code": row[4],
-                        "score": sim
-                    }
-            except: continue
-    return best_row if best_row and best_row["score"] >= threshold else None
+def find_best_match(new_emb, threshold=0.5):
+    best = None
+    best_score = -1.0
+    conn = sqlite3.connect(DB_PATH)
+    for row in conn.execute("SELECT id, name, vba_macro, embedding, generated_code FROM macro_matches"):
+        try:
+            old_emb = json.loads(row[3])
+            sim = cosine_similarity(new_emb, old_emb)
+            if sim > best_score:
+                best_score = sim
+                best = {"id": row[0], "name": row[1], "vba_macro": row[2], "generated_code": row[4], "score": sim}
+        except:
+            pass
+    conn.close()
+    return best if best and best["score"] >= threshold else None
 
-def store_result(name, macro, category, embedding, pycode, feedback):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            INSERT INTO macro_matches (name, vba_macro, category, embedding, generated_code, feedback)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (name, macro, category, json.dumps(embedding), pycode, feedback))
+def store_result(name, macro, category, emb, code, feedback):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO macro_matches (name, vba_macro, category, embedding, generated_code, feedback) VALUES (?, ?, ?, ?, ?, ?)",
+        (name, macro, category, json.dumps(emb), code, feedback)
+    )
+    conn.close()
 
-# === Claude Stream ===
 def stream_claude(prompt: str):
-    payload = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4000,
-        "temperature": 0,
-        "top_p": 1.0,
-        "top_k": 1,
-    }
+    payload = {"anthropic_version": "bedrock-2023-05-31", "messages": [{"role":"user","content":prompt}], "max_tokens":4000, "temperature":0}
     resp = bedrock.invoke_model_with_response_stream(
         modelId="arn:aws:bedrock:us-east-1:137360334857:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0",
         body=json.dumps(payload),
     )
     for event in resp["body"]:
         chunk = json.loads(event["chunk"]["bytes"])
-        if delta := chunk.get("delta"):
-            if text := delta.get("text"):
-                yield text
+        if delta := chunk.get("delta") and delta.get("text"):
+            yield delta["text"]
 
 class VBAState(TypedDict):
-    file_path: Optional[str]
-    vba_code: Optional[str]
-    category: Optional[str]
-    generated_code: Optional[str]
-    embedding: Optional[list]
+    vba_code: str
+    category: str
+    embedding: list
     match: Optional[dict]
+    generated_code: str
 
 # === Streamlit App ===
 st.set_page_config(page_title="VBA2PyGen+", layout="wide")
 st.title("🧠 VBA2PyGen + Titan Matching")
-progress = st.progress(0)
 
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm", "xls", "xlsb"])
+# Widgets
+uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm","xls","xlsb"])
 if not uploaded_file:
     st.stop()
 
+# Session flags
+file_id = uploaded_file.name
+if "processed_file_id" not in st.session_state:
+    st.session_state["processed_file_id"] = None
 if "voted" not in st.session_state:
     st.session_state["voted"] = False
 
-# === Reuse previously saved state ===
-if st.session_state["voted"] and "vba_state" in st.session_state:
-    state = st.session_state["vba_state"]
-    with st.expander("Step 1: Extracted VBA code"):
-        st.code(state["vba_code"], language="vb")
-    if state.get("match"):
-        st.markdown(f"**Reference Found:** `{state['match']['name']}` — `{round(state['match']['score']*100, 2)}%`")
+# Determine if we should process
+should_process = (st.session_state["processed_file_id"] != file_id) and not st.session_state["voted"]
+
+if should_process:
+    # Save temp file
+    suffix = os.path.splitext(file_id)[1]
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(uploaded_file.getbuffer())
+    tmp.flush()
+    tmp_path = tmp.name
+    tmp.close()
+
+    # Extract VBA
+    parser = VBA_Parser(tmp_path)
+    modules = [code.strip() for *_, code in parser.extract_macros() if code.strip()]
+    if not modules:
+        st.error("No VBA macros found.")
+        st.stop()
+    vba_code = "\n\n".join(modules)
+    with st.expander("Extracted VBA code"):
+        st.code(vba_code, language="vb")
+
+    # Embed & match
+    emb = get_embedding(vba_code)
+    match = find_best_match(emb)
+    if match:
+        st.markdown(f"**Reference Found:** `{match['name']}` — `{round(match['score']*100,2)}%`")
         with st.expander("Matched VBA Macro"):
-            st.code(state['match']['vba_macro'], language="vb")
+            st.code(match['vba_macro'], language="vb")
         with st.expander("Matched Python Code"):
-            st.code(state['match']['generated_code'], language="python")
-    st.markdown(f"**Detected Category:** `{state['category']}`")
-    with st.expander("Step 4: Generated Python Code"):
-        st.code(state["generated_code"], language="python")
+            st.code(match['generated_code'], language="python")
+    else:
+        match = None
 
-# === Initial processing ===
-if not st.session_state["voted"]:
-    suffix = os.path.splitext(uploaded_file.name)[1]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getbuffer())
-        tmp_path = tmp.name
+    # Categorize
+    cat_prompt = "Classify into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Only return category.\n\n" + vba_code
+    cat = "".join(stream_claude(cat_prompt)).strip().lower()
+    category = cat if cat in PROMPTS else "normal_operations"
+    st.markdown(f"**Detected Category:** `{category}`")
 
-    state: VBAState = {"file_path": tmp_path}
-
-    with st.spinner("Step 1: Extracting VBA..."):
-        parser = VBA_Parser(tmp_path)
-        modules = [code.strip() for _, _, _, code in parser.extract_macros() if code.strip()]
-        if not modules:
-            st.error("No VBA macros found.")
-            st.stop()
-        state["vba_code"] = "\n\n".join(modules)
-        with st.expander("Step 1: Extracted VBA code"):
-            st.code(state["vba_code"], language="vb")
-    progress.progress(20)
-
-    with st.spinner("Step 2: Embedding & Matching"):
-        state["embedding"] = get_embedding(state["vba_code"])
-        match = find_best_match(state["embedding"])
-        state["match"] = match
-        if match:
-            st.markdown(f"**Reference Found:** `{match['name']}` — `{round(match['score']*100, 2)}%`)" )
-            with st.expander("Matched VBA Macro"):
-                st.code(match['vba_macro'], language="vb")
-            with st.expander("Matched Python Code"):
-                st.code(match['generated_code'], language="python")
-    progress.progress(50)
-
-    with st.spinner("Step 3: Categorizing"):
-        cat_prompt = (
-            "Classify this VBA code as one of: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n"
-            + state["vba_code"]
-        )
-        detected = "".join(stream_claude(cat_prompt)).strip().lower()
-        state["category"] = detected if detected in PROMPTS else "normal_operations"
-        st.markdown(f"**Detected Category:** `{state['category']}`")
-    progress.progress(70)
-
-    final_prompt = PROMPTS[state["category"]].format(vba_code=state["vba_code"])
+    # Build prompt & generate code
+    final_prompt = PROMPTS[category].format(vba_code=vba_code)
     with st.expander("Prompt Used"):
         st.code(final_prompt, language="text")
+    full = "".join(stream_claude(final_prompt))
+    if "```python" in full:
+        s = full.find("```python") + len("```python")
+        e = full.find("```", s)
+        gen_code = full[s:e].strip()
+    else:
+        gen_code = full.strip()
+    with st.expander("Generated Python Code"):
+        st.code(gen_code, language="python")
 
-    with st.spinner("Step 4: Generating Python Code"):
-        full = "".join(stream_claude(final_prompt))
-        if "```python" in full:
-            s = full.find("```python") + len("```python")
-            e = full.find("```", s)
-            code = full[s:e].strip()
-        else:
-            code = full.strip()
-        state["generated_code"] = code
-    with st.expander("Step 4: Generated Python Code"):
-        st.code(code, language="python")
-    progress.progress(100)
-
-    # save session state
+    # Persist state
+    state = VBAState(vba_code=vba_code, category=category, embedding=emb, match=match, generated_code=gen_code)
     st.session_state["vba_state"] = state
+    st.session_state["processed_file_id"] = file_id
 
-# === Voting (always visible, no re-generation) ===
+# On rerun or after voting, reuse state
+state = st.session_state.get("vba_state")
+if state:
+    if not should_process:
+        with st.expander("Extracted VBA code"):
+            st.code(state.vba_code, language="vb")
+        if state.match:
+            st.markdown(f"**Reference Found:** `{state.match['name']}` — `{round(state.match['score']*100,2)}%`")
+            with st.expander("Matched VBA Macro"):
+                st.code(state.match['vba_macro'], language="vb")
+            with st.expander("Matched Python Code"):
+                st.code(state.match['generated_code'], language="python")
+        st.markdown(f"**Detected Category:** `{state.category}`")
+        with st.expander("Generated Python Code"):
+            st.code(state.generated_code, language="python")
+
+# Voting UI
 col1, col2 = st.columns(2)
-if col1.button("👍 Save this result (Helpful)", disabled=st.session_state["voted"]):
-    store_result(
-        name=uploaded_file.name,
-        macro=state["vba_code"],
-        category=state["category"],
-        embedding=state["embedding"],
-        pycode=state["generated_code"],
-        feedback=1
-    )
+if col1.button("👍 Save result (Helpful)", disabled=st.session_state["voted"]):
+    store_result(file_id, state.vba_code, state.category, state.embedding, state.generated_code, 1)
     st.session_state["voted"] = True
     st.success("Stored with 👍 feedback")
-
-if col2.button("👎 Save this result (Not Helpful)", disabled=st.session_state["voted"]):
-    store_result(
-        name=uploaded_file.name,
-        macro=state["vba_code"],
-        category=state["category"],
-        embedding=state["embedding"],
-        pycode=state["generated_code"],
-        feedback=-1
-    )
+if col2.button("👎 Save result (Not Helpful)", disabled=st.session_state["voted"]):
+    store_result(file_id, state.vba_code, state.category, state.embedding, state.generated_code, -1)
     st.session_state["voted"] = True
     st.success("Stored with 👎 feedback")
