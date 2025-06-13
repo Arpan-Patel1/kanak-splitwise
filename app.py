@@ -126,7 +126,23 @@ if not uploaded_file:
 if "voted" not in st.session_state:
     st.session_state["voted"] = False
 
-if uploaded_file and not st.session_state["voted"]:
+# === Reuse previously saved state ===
+if st.session_state["voted"] and "vba_state" in st.session_state:
+    state = st.session_state["vba_state"]
+    with st.expander("Step 1: Extracted VBA code"):
+        st.code(state["vba_code"], language="vb")
+    if state.get("match"):
+        st.markdown(f"**Reference Found:** `{state['match']['name']}` — `{round(state['match']['score']*100, 2)}%`")
+        with st.expander("Matched VBA Macro"):
+            st.code(state['match']['vba_macro'], language="vb")
+        with st.expander("Matched Python Code"):
+            st.code(state['match']['generated_code'], language="python")
+    st.markdown(f"**Detected Category:** `{state['category']}`")
+    with st.expander("Step 4: Generated Python Code"):
+        st.code(state["generated_code"], language="python")
+
+# === Initial processing ===
+if not st.session_state["voted"]:
     suffix = os.path.splitext(uploaded_file.name)[1]
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(uploaded_file.getbuffer())
@@ -150,7 +166,7 @@ if uploaded_file and not st.session_state["voted"]:
         match = find_best_match(state["embedding"])
         state["match"] = match
         if match:
-            st.markdown(f"**Reference Found:** `{match['name']}` — `{round(match['score']*100, 2)}%`)")
+            st.markdown(f"**Reference Found:** `{match['name']}` — `{round(match['score']*100, 2)}%`)" )
             with st.expander("Matched VBA Macro"):
                 st.code(match['vba_macro'], language="vb")
             with st.expander("Matched Python Code"):
@@ -184,27 +200,31 @@ if uploaded_file and not st.session_state["voted"]:
         st.code(code, language="python")
     progress.progress(100)
 
-    col1, col2 = st.columns(2)
-    if col1.button("👍 Save this result (Helpful)"):
-        store_result(
-            name=uploaded_file.name,
-            macro=state["vba_code"],
-            category=state["category"],
-            embedding=state["embedding"],
-            pycode=state["generated_code"],
-            feedback=1
-        )
-        st.session_state["voted"] = True
-        st.success("Stored with 👍 feedback")
+    # save session state
+    st.session_state["vba_state"] = state
 
-    if col2.button("👎 Save this result (Not Helpful)"):
-        store_result(
-            name=uploaded_file.name,
-            macro=state["vba_code"],
-            category=state["category"],
-            embedding=state["embedding"],
-            pycode=state["generated_code"],
-            feedback=-1
-        )
-        st.session_state["voted"] = True
-        st.success("Stored with 👎 feedback")
+# === Voting (always visible, no re-generation) ===
+col1, col2 = st.columns(2)
+if col1.button("👍 Save this result (Helpful)", disabled=st.session_state["voted"]):
+    store_result(
+        name=uploaded_file.name,
+        macro=state["vba_code"],
+        category=state["category"],
+        embedding=state["embedding"],
+        pycode=state["generated_code"],
+        feedback=1
+    )
+    st.session_state["voted"] = True
+    st.success("Stored with 👍 feedback")
+
+if col2.button("👎 Save this result (Not Helpful)", disabled=st.session_state["voted"]):
+    store_result(
+        name=uploaded_file.name,
+        macro=state["vba_code"],
+        category=state["category"],
+        embedding=state["embedding"],
+        pycode=state["generated_code"],
+        feedback=-1
+    )
+    st.session_state["voted"] = True
+    st.success("Stored with 👎 feedback")
