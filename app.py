@@ -237,3 +237,47 @@ if st.session_state["generated_code"] is None:
     st.success("✅ Conversion completed!")
 else:
     st.success("✅ Already processed.")
+
+
+
+
+
+botocore.errorfactory.ValidationException: An error occurred (ValidationException) when calling the InvokeModel operation: The provided model identifier is invalid.
+Traceback:
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\streamlit\runtime\scriptrunner\exec_code.py", line 121, in exec_func_with_error_handling
+    result = func()
+             ^^^^^^
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\streamlit\runtime\scriptrunner\script_runner.py", line 640, in code_to_exec
+    exec(code, module.__dict__)
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\test.py", line 280, in <module>
+    for state in graph.stream({"file_path": tmp_path}):
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\langgraph\pregel\__init__.py", line 2353, in stream
+    for _ in runner.tick(
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\langgraph\pregel\runner.py", line 158, in tick
+    run_with_retry(
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\langgraph\pregel\retry.py", line 40, in run_with_retry
+    return task.proc.invoke(task.input, config)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\langgraph\utils\runnable.py", line 610, in invoke
+    input = step.invoke(input, config, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\langgraph\utils\runnable.py", line 375, in invoke
+    ret = context.run(self.func, *args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\test.py", line 200, in build_prompt
+    match = find_best_reference(state["vba_code"])
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\test.py", line 52, in find_best_reference
+    query_vec = get_embedding(vba_code)
+                ^^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\test.py", line 37, in get_embedding
+    response = bedrock.invoke_model(
+               ^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\botocore\client.py", line 570, in _api_call
+    return self._make_api_call(operation_name, kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\botocore\context.py", line 124, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\botocore\client.py", line 1031, in _make_api_call
+    raise error_class(parsed_response, operation_name)
