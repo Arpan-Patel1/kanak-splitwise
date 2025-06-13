@@ -15,24 +15,11 @@ EMBED_MODEL_ID = "amazon.titan-embed-text-v2:0"
 DB_PATH = "macro_embeddings.db"
 
 PROMPTS = {
-    "pivot_table": """I have the following VBA code that creates a Pivot Table in Excel:
-{vba_code}
-Please write equivalent Python code that:
-- Produces the same summarized data using pandas.pivot_table or groupby
-- Saves the result back to Excel
-- Uses only valid Python libraries and runs end-to-end""",
-    "pivot_chart": "I have the following VBA code that creates a Pivot Chart in Excel:
-{vba_code}
-Generate equivalent Python code using pandas and a charting library to match the VBA chart.",
-    "user_form": "I have the following VBA UserForm code:
-{vba_code}
-Generate equivalent Python GUI code using Tkinter or PyQt5 to collect input and write to Excel.",
-    "formula": "I have the following Excel formula/VBA logic:
-{vba_code}
-Write Python code using pandas/numpy to compute the same results and save back to Excel.",
-    "normal_operations": "I have the following VBA code performing standard operations (inserting rows, formatting, etc.):
-{vba_code}
-Write equivalent Python code using openpyxl or pandas to replicate these operations, including formatting via openpyxl.styles."
+    "pivot_table": """I have the following VBA code that creates a Pivot Table in Excel:\n{vba_code}\nPlease write equivalent Python code that:\n- Produces the same summarized data using pandas.pivot_table or groupby\n- Saves the result back to Excel\n- Uses only valid Python libraries and runs end-to-end""",
+    "pivot_chart": "I have the following VBA code that creates a Pivot Chart in Excel:\n{vba_code}\nGenerate equivalent Python code using pandas and a charting library to match the VBA chart.",
+    "user_form": "I have the following VBA UserForm code:\n{vba_code}\nGenerate equivalent Python GUI code using Tkinter or PyQt5 to collect input and write to Excel.",
+    "formula": "I have the following Excel formula/VBA logic:\n{vba_code}\nWrite Python code using pandas/numpy to compute the same results and save back to Excel.",
+    "normal_operations": "I have the following VBA code performing standard operations (inserting rows, formatting, etc.):\n{vba_code}\nWrite equivalent Python code using openpyxl or pandas to replicate these operations, including formatting via openpyxl.styles."
 }
 
 # === DB Init ===
@@ -53,7 +40,6 @@ def init_db():
         """
     )
     conn.close()
-
 init_db()
 
 # === Cachable Helpers ===
@@ -91,16 +77,14 @@ def cosine_similarity(v1, v2):
 def find_best_match(emb, threshold=0.5):
     conn = sqlite3.connect(DB_PATH)
     best, score = None, -1.0
-    for id_, name, vba, emb_str, code in conn.execute(
-        "SELECT id,name,vba_macro,embedding,generated_code FROM macro_matches"
-    ):
-        old = json.loads(emb_str)
+    for row in conn.execute("SELECT id,name,vba_macro,embedding,generated_code FROM macro_matches"):
+        old = json.loads(row[3])
         sim = cosine_similarity(emb, old)
         if sim > score:
-            best, score = (id_, name, vba, old, code, sim), sim
+            best, score = row, sim
     conn.close()
     if best and score >= threshold:
-        id_, name, vba, old, code, _ = best
+        id_, name, vba, embstr, code = best[0], best[1], best[2], best[3], best[4]
         return {"id": id_, "name": name, "vba_macro": vba, "generated_code": code, "score": score}
     return None
 
@@ -125,17 +109,9 @@ def update_feedback(record_id, delta):
 
 # === Claude Stream ===
 def stream_claude(prompt: str):
-    payload = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 4000,
-        "temperature": 0,
-    }
+    payload = {"anthropic_version": "bedrock-2023-05-31", "messages": [{"role": "user", "content": prompt}], "max_tokens": 4000, "temperature": 0}
     resp = bedrock.invoke_model_with_response_stream(
-        modelId=(
-            "arn:aws:bedrock:us-east-1:137360334857:"
-            "inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"
-        ),
+        modelId=("arn:aws:bedrock:us-east-1:137360334857:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"),
         body=json.dumps(payload),
     )
     for event in resp.get("body", []):
@@ -170,12 +146,9 @@ if "processed_file_id" not in st.session_state:
     st.session_state["processed_file_id"] = None
 
 # Determine if we process
-do_process = (
-    st.session_state["processed_file_id"] != file_id
-    and not st.session_state["voted"]
-)
+do_process = (st.session_state["processed_file_id"] != file_id) and not st.session_state["voted"]
 
-# Progress bar and spinner placeholder
+# UI placeholders
 progress = st.progress(0)
 spinner = st.empty()
 
@@ -183,20 +156,17 @@ if do_process:
     # Step 1: Extract VBA
     with spinner.spinner("Step 1: Extracting VBA..."):
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file_id)[1])
-        tmp.write(uploaded_file.getbuffer())
-        tmp.flush()
-        tmp_path = tmp.name
-        tmp.close()
+        tmp.write(uploaded_file.getbuffer()); tmp.flush(); tmp_path = tmp.name; tmp.close()
         vba_code = extract_vba(tmp_path)
     progress.progress(20)
 
-    # Step 2: Embedding & Match
+    # Step 2: Embed & match
     with spinner.spinner("Step 2: Embedding & matching..."):
         emb = get_embedding(vba_code)
         match = find_best_match(emb)
     progress.progress(40)
 
-    # Display extracted and match
+    # Show code and match
     with st.expander("Extracted VBA Code"):
         st.code(vba_code, language="vb")
     if match:
@@ -212,37 +182,31 @@ if do_process:
         st.markdown(f"**Detected Category:** `{category}`")
     progress.progress(60)
 
-    # Step 4: Generate Python Code
-    with spinner.spinner("Step 4: Generating Python code..."):
-        prompt = PROMPTS[category].format(vba_code=vba_code)
-        with st.expander("Prompt Used"):
-            st.code(prompt, language="text")
-        full = "".join(stream_claude(prompt))
-        py_code = (
-            full.split("```python", 1)[1].split("```", 1)[0].strip()
-            if "```python" in full
-            else full.strip()
-        )
-        with st.expander("Generated Python Code"):
-            st.code(py_code, language="python")
+    # Step 4: Build Prompt
+    with spinner.spinner("Step 4: Building prompt..."):
+        prompt_text = PROMPTS[category].format(vba_code=vba_code)
+    with st.expander("Prompt Used"):
+        st.code(prompt_text, language="text")
+    progress.progress(80)
+
+    # Step 5: Generate Python code
+    with spinner.spinner("Step 5: Generating Python code..."):
+        full = "".join(stream_claude(prompt_text))
+        py_code = (full.split("```python", 1)[1].split("```", 1)[0].strip() if "```python" in full else full.strip())
+    with st.expander("Generated Python Code"):
+        st.code(py_code, language="python")
     progress.progress(100)
     spinner.empty()
 
     # Save state
-    st.session_state["state"] = VBAState(
-        vba_code=vba_code,
-        category=category,
-        embedding=emb,
-        match=match,
-        py_code=py_code,
-    )
+    st.session_state["state"] = VBAState(vba_code=vba_code, category=category, embedding=emb, match=match, py_code=py_code)
     st.session_state["processed_file_id"] = file_id
 
-# Display saved state if not processing
+# Display existing state if not processing
 state = st.session_state.get("state")
 if state and not do_process:
     with st.expander("Extracted VBA Code"):
-        st.code(state["vba_code"], language="vb")
+        st.code(state['vba_code'], language="vb")
     if state.get("match"):
         st.markdown(f"**Reference Found:** `{state['match']['name']}` — `{state['match']['score']*100:.1f}%`")
         with st.expander("Matched VBA Macro"):
@@ -250,30 +214,7 @@ if state and not do_process:
         with st.expander("Matched Python Code"):
             st.code(state['match']['generated_code'], language="python")
     st.markdown(f"**Detected Category:** `{state['category']}`")
+    with st.expander("Prompt Used"):
+        st.code(PROMPTS[state['category']].format(vba_code=state['vba_code']), language="text")
     with st.expander("Generated Python Code"):
         st.code(state['py_code'], language="python")
-
-# Voting callbacks
-def upvote():
-    rid = insert_record(
-        file_id,
-        state["vba_code"],
-        state["category"],
-        state["embedding"],
-        state["py_code"],
-        1,
-    )
-    if state.get("match"):
-        update_feedback(state["match"]["id"], 1)
-    st.session_state["voted"] = True
-
-
-def downvote():
-    if state.get("match"):
-        update_feedback(state["match"]["id"], -1)
-    st.session_state["voted"] = True
-
-# Voting UI
-col1, col2 = st.columns(2)
-col1.button("👍 Helpful", on_click=upvote, disabled=st.session_state["voted"])
-col2.button("👎 Not Helpful", on_click=downvote, disabled=st.session_state["voted"])
