@@ -1,10 +1,10 @@
 import os
 import json
-import tempfile
 import sqlite3
-import numpy as np
+import tempfile
 from typing import TypedDict, Optional
 
+import numpy as np
 import openpyxl
 import pandas as pd
 import streamlit as st
@@ -12,32 +12,80 @@ import boto3
 from oletools.olevba import VBA_Parser
 from langgraph.graph import StateGraph, END
 
-# === DATABASE ===
-DB_PATH = "references.db"
+# === Configs ===
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+EMBED_MODEL_ID = "amazon.titan-embed-text-v2:0"
+DB_PATH = "macro_embeddings.db"
 
+# === Prompt Templates ===
+PROMPTS = {
+    "pivot_table": "...",  # same content as earlier
+    "pivot_chart": "...",
+    "user_form": "...",
+    "formula": "...",
+    "normal_operations": "..."
+}
+
+# === DB Init ===
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS refs (
+            CREATE TABLE IF NOT EXISTS macro_matches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                vba TEXT,
+                name TEXT,
+                vba_macro TEXT,
+                category TEXT,
                 embedding TEXT,
-                python_code TEXT,
-                score INTEGER DEFAULT 0
+                matched_score REAL,
+                final_prompt TEXT,
+                generated_code TEXT,
+                feedback TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
-
 init_db()
 
-# === AWS ===
-bedrock = boto3.client("bedrock-runtime")
-TITAN_ID = "amazon.titan-embed-text-v2:0"
-CLAUDE_ID = "arn:aws:bedrock:us-east-1:137360334857:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+# === Embedding & Matching ===
+def get_embedding(text: str):
+    if len(text) > 25000:
+        text = text[:25000]
+    payload = {"inputText": text}
+    response = bedrock.invoke_model(
+        modelId=EMBED_MODEL_ID,
+        contentType="application/json",
+        accept="application/json",
+        body=json.dumps(payload),
+    )
+    return json.loads(response["body"].read())["embedding"]
 
-# === PROMPTS ===
-from prompts import PROMPTS  # keep your original PROMPTS dict in a separate file
+def cosine_similarity(v1, v2):
+    v1, v2 = np.array(v1), np.array(v2)
+    return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
 
-# === Claude ===
+def find_best_match(new_embedding):
+    best_score, best_row = -1, None
+    with sqlite3.connect(DB_PATH) as conn:
+        for row in conn.execute("SELECT id, name, vba_macro, embedding FROM macro_matches"):
+            try:
+                old = json.loads(row[3])
+                sim = cosine_similarity(new_embedding, old)
+                if sim > best_score:
+                    best_score = sim
+                    best_row = (row[0], row[1], row[2], sim)
+            except: continue
+    return best_row
+
+def store_result(name, macro, category, embedding, score, prompt, pycode):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO macro_matches (name, vba_macro, category, embedding, matched_score, final_prompt, generated_code, feedback)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+        """, (name, macro, category, json.dumps(embedding), score, prompt, pycode))
+
+def update_feedback(id_, vote):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE macro_matches SET feedback = ? WHERE id = ?", (vote, id_))
+
 def stream_claude(prompt: str):
     payload = {
         "anthropic_version": "bedrock-2023-05-31",
@@ -47,149 +95,102 @@ def stream_claude(prompt: str):
         "top_p": 1.0,
         "top_k": 1,
     }
-    resp = bedrock.invoke_model_with_response_stream(modelId=CLAUDE_ID, body=json.dumps(payload))
+    resp = bedrock.invoke_model_with_response_stream(
+        modelId="arn:aws:bedrock:us-east-1:137360334857:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        body=json.dumps(payload),
+    )
     for event in resp["body"]:
         chunk = json.loads(event["chunk"]["bytes"])
         if delta := chunk.get("delta"):
             if text := delta.get("text"):
                 yield text
 
-# === Titan Embed ===
-def get_embedding(text: str) -> list[float]:
-    response = bedrock.invoke_model(
-        modelId=TITAN_ID,
-        body=json.dumps({"inputText": text}),
-        contentType="application/json",
-        accept="application/json",
-    )
-    return json.loads(response["body"].read())["embedding"]
-
-# === Cosine Match ===
-def cosine_similarity(v1, v2):
-    a, b = np.array(v1), np.array(v2)
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-def find_best_reference(new_emb: list[float]):
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.execute("SELECT id, embedding, python_code, score FROM refs")
-        best = (None, -1.0)
-        for row in cur.fetchall():
-            db_id, emb_str, py, score = row
-            db_emb = json.loads(emb_str)
-            sim = cosine_similarity(new_emb, db_emb)
-            if sim > best[1]:
-                best = (row, sim)
-        return best
-
-# === VBA State ===
 class VBAState(TypedDict):
     file_path: Optional[str]
     vba_code: Optional[str]
     category: Optional[str]
     final_prompt: Optional[str]
     generated_code: Optional[str]
-    embedding: Optional[list[float]]
+    embedding: Optional[list]
+    match_score: Optional[float]
+    match_id: Optional[int]
 
-# === YOUR ORIGINAL FUNCTIONS ===
-def extract_vba(state: VBAState) -> VBAState:
-    with st.spinner("Extracting VBA..."):
-        parser = VBA_Parser(state["file_path"])
-        modules = [code.strip() for _, _, _, code in parser.extract_macros() if code.strip()]
-        if not modules:
-            st.error("No VBA macros found.")
-            st.stop()
-        state["vba_code"] = "\n\n".join(modules)
-    with st.expander("Step 1: Extracted VBA code"):
-        st.code(state["vba_code"], language="text")
-    progress.progress(20)
-    return state
+# === Streamlit UI ===
+st.set_page_config(page_title="VBA2PyGen+", layout="wide")
+st.title("🧠 VBA2PyGen + Titan Matching")
 
-def categorize_vba(state: VBAState) -> VBAState:
-    prompt = "Classify the following VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n" + state["vba_code"]
-    cat = "".join(stream_claude(prompt)).strip().lower()
-    state["category"] = cat if cat in PROMPTS else "normal_operations"
-    with st.expander("Step 2: Detected Category"):
-        st.markdown(f"**Category detected:** {state['category']}")
-    progress.progress(40)
-    return state
-
-def build_prompt(state: VBAState) -> VBAState:
-    state["final_prompt"] = PROMPTS[state["category"]].format(vba_code=state["vba_code"])
-    with st.expander("Step 3: AI Prompt"):
-        st.code(state["final_prompt"], language="text")
-    progress.progress(60)
-    return state
-
-def generate_python_code(state: VBAState) -> VBAState:
-    with st.spinner("Generating Python code..."):
-        full = "".join(stream_claude(state["final_prompt"]))
-        code = full
-        if "```python" in full:
-            s = full.find("```python") + len("```python")
-            e = full.find("```", s)
-            code = full[s:e].strip()
-        state["generated_code"] = code
-    with st.expander("Step 4: Generated Code"):
-        st.code(code, language="python")
-    progress.progress(80)
-    return state
-
-# === New Steps ===
-def embed_code(state: VBAState) -> VBAState:
-    state["embedding"] = get_embedding(state["vba_code"])
-    return state
-
-def show_reference_match(state: VBAState) -> VBAState:
-    row, score = find_best_reference(state["embedding"])
-    if row:
-        db_id, _, _, ref_code, _ = row
-        st.markdown(f"### 🔍 Closest Match (Similarity: `{score:.2%}`)")
-        st.code(ref_code, language="python")
-        col1, col2 = st.columns(2)
-        if col1.button("✅ Works", key="upvote"):
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.execute("UPDATE refs SET score = score + 1 WHERE id = ?", (db_id,))
-        if col2.button("❌ Failed", key="downvote"):
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.execute("UPDATE refs SET score = score - 1 WHERE id = ?", (db_id,))
-    return state
-
-def save_reference(state: VBAState) -> VBAState:
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO refs (vba, embedding, python_code, score) VALUES (?, ?, ?, 0)",
-            (state["vba_code"], json.dumps(state["embedding"]), state["generated_code"])
-        )
-    return state
-
-# === Graph ===
-def build_graph():
-    g = StateGraph(VBAState)
-    steps = [extract_vba, categorize_vba, build_prompt, generate_python_code, embed_code, show_reference_match, save_reference]
-    for fn in steps:
-        g.add_node(fn.__name__, fn)
-    g.set_entry_point(steps[0].__name__)
-    for a, b in zip(steps, steps[1:]):
-        g.add_edge(a.__name__, b.__name__)
-    g.add_edge(steps[-1].__name__, END)
-    return g.compile()
-
-# === UI ===
-st.set_page_config(page_title="VBA2PyGen", layout="wide")
-st.title("VBA2PyGen")
 progress = st.progress(0)
+uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm", "xls", "xlsb"])
 
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm", "xls"])
-if uploaded_file:
-    xlsx_path = os.path.join(os.getcwd(), uploaded_file.name)
-    with open(xlsx_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsm") as tmp:
-        tmp.write(uploaded_file.getbuffer())
-        tmp_path = tmp.name
-    graph = build_graph()
-    for state in graph.stream({"file_path": tmp_path}):
-        final = state
-    st.success("✅ Conversion completed!")
-else:
-    st.info("Please upload a file to begin.")
+if not uploaded_file:
+    st.stop()
+
+suffix = os.path.splitext(uploaded_file.name)[1]
+with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+    tmp.write(uploaded_file.getbuffer())
+    tmp_path = tmp.name
+
+state: VBAState = {"file_path": tmp_path}
+
+with st.spinner("Step 1: Extracting VBA..."):
+    parser = VBA_Parser(tmp_path)
+    modules = [code.strip() for _, _, _, code in parser.extract_macros() if code.strip()]
+    if not modules:
+        st.error("No VBA macros found.")
+        st.stop()
+    state["vba_code"] = "\n\n".join(modules)
+    st.code(state["vba_code"], language="vb")
+progress.progress(20)
+
+with st.spinner("Step 2: Embedding and Matching..."):
+    state["embedding"] = get_embedding(state["vba_code"])
+    match = find_best_match(state["embedding"])
+    state["match_score"] = match[3] if match else 0.0
+    state["match_id"] = match[0] if match else None
+    if match:
+        st.markdown(f"**Closest Match:** `{match[1]}` — `{round(match[3]*100, 2)}%`")
+        with st.expander("Matched Macro"):
+            st.code(match[2], language="vb")
+progress.progress(40)
+
+with st.spinner("Step 3: Categorizing Macro..."):
+    cat_prompt = (
+        "Classify this VBA code as one of: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n"
+        + state["vba_code"]
+    )
+    detected = "".join(stream_claude(cat_prompt)).strip().lower()
+    state["category"] = detected if detected in PROMPTS else "normal_operations"
+    st.markdown(f"**Detected Category:** `{state['category']}`")
+progress.progress(60)
+
+state["final_prompt"] = PROMPTS[state["category"]].format(vba_code=state["vba_code"])
+with st.expander("AI Prompt"):
+    st.code(state["final_prompt"], language="text")
+
+with st.spinner("Step 4: Generating Python Code..."):
+    full = "".join(stream_claude(state["final_prompt"]))
+    state["generated_code"] = full.strip()
+    st.code(state["generated_code"], language="python")
+progress.progress(80)
+
+store_result(
+    name=uploaded_file.name,
+    macro=state["vba_code"],
+    category=state["category"],
+    embedding=state["embedding"],
+    score=state["match_score"],
+    prompt=state["final_prompt"],
+    pycode=state["generated_code"]
+)
+
+st.success("✅ Conversion complete and saved!")
+progress.progress(100)
+
+if state["match_id"]:
+    col1, col2 = st.columns(2)
+    if col1.button("👍 Upvote Match"):
+        update_feedback(state["match_id"], "upvote")
+        st.success("Thanks for your feedback!")
+    if col2.button("👎 Downvote Match"):
+        update_feedback(state["match_id"], "downvote")
+        st.success("Feedback noted!")
