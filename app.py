@@ -1,3 +1,4 @@
+```python
 import os
 import json
 import tempfile
@@ -156,6 +157,14 @@ def generate_python_code(state: VBAState) -> VBAState:
         state["generated_code"] = code
     with st.expander("Step 4: Generated Code"):
         st.code(code, language="python")
+    # Save generated Python code to file
+    py_path = os.path.splitext(st.session_state['xlsx_path'])[0] + ".py"
+    try:
+        with open(py_path, "w") as f:
+            f.write(code)
+        st.markdown(f"**Saved Python code at:** `{py_path}`")
+    except Exception as e:
+        st.error(f"Error saving Python file: {e}")
     progress.progress(80)
     return state
 
@@ -208,3 +217,4 @@ if st.session_state["generated_code"] is None:
     st.success("✅ Conversion completed!")
 else:
     st.success("✅ Already processed.")
+```
