@@ -1,240 +1,74 @@
-import os
-import json
-import tempfile
-import sqlite3
-from typing import TypedDict, Optional
+# streamlit_app.py
+import os, json, tempfile, sqlite3
+from typing import List
 
 import openpyxl
-import pandas as pd
 import streamlit as st
 import boto3
 from oletools.olevba import VBA_Parser
-from langgraph.graph import StateGraph, END
-import numpy as np
 
-# === EMBEDDING + REFERENCE STORAGE ===
-db_path = "reference_store.db"
-
-def init_db():
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS macro_references (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                macro TEXT NOT NULL,
-                embedding TEXT NOT NULL,
-                python_code TEXT NOT NULL,
-                score INTEGER DEFAULT 0
-            )
-        """)
-
-init_db()
-
+# ---------- Bedrock client ----------
 bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
 
-def get_embedding(text: str) -> list[float]:
-    payload = {
-        "inputText": text
-    }
-    response = bedrock.invoke_model(
-        modelId="amazon.titan-embed-text-v2:0",
-        contentType="application/json",
-        accept="application/json",
-        body=json.dumps(payload),
-    )
-    embedding = json.loads(response['body'].read())['embedding']
-    return embedding
+EMBED_MODEL_ID = "amazon.titan-embed-text-v2:0"  # <-- correct suffix “:0”
 
-def cosine_similarity(a, b):
-    a, b = np.array(a), np.array(b)
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-def find_best_reference(vba_code):
-    query_vec = get_embedding(vba_code)
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute("SELECT id, macro, embedding, python_code, score FROM macro_references")
-        best_id, best_code, best_score = None, None, -1
-        for rid, macro, emb_json, py_code, score in cur.fetchall():
-            try:
-                ref_vec = json.loads(emb_json)
-                sim = cosine_similarity(query_vec, ref_vec)
-                if sim > 0.90 and score >= best_score:
-                    best_id, best_code, best_score = rid, py_code, score
-            except: pass
-    return best_code
-
-def save_reference(macro, python_code):
-    embedding = get_embedding(macro)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("INSERT INTO macro_references (macro, embedding, python_code, score) VALUES (?, ?, ?, 1)",
-                     (macro, json.dumps(embedding), python_code))
-
-def update_reference_feedback(macro, is_good: bool):
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute("SELECT id FROM macro_references WHERE macro=? ORDER BY id DESC LIMIT 1", (macro,))
-        row = cur.fetchone()
-        if row:
-            rid = row[0]
-            conn.execute("UPDATE macro_references SET score = score + ? WHERE id=?", (1 if is_good else -1, rid))
-
-# === PROMPTS ===
-PROMPTS = {
-    "pivot_table": """I have the following VBA code that creates a Pivot Table in Excel:\n{vba_code} ...""",
-    "pivot_chart": """I have the following VBA code that creates a Pivot Chart in Excel:\n{vba_code} ...""",
-    "user_form": """I have the following VBA code that creates and handles a UserForm in Excel: \n{vba_code} ...""",
-    "formula": """I have the following VBA or Excel formula-based code:\n{vba_code} ...""",
-    "normal_operations": """I have the following VBA code that performs normal Excel operations (like inserting rows, copying values, deleting columns, formatting cells, renaming sheets, etc.):\n{vba_code} ...""",
-}
-
-class VBAState(TypedDict):
-    file_path: Optional[str]
-    vba_code: Optional[str]
-    category: Optional[str]
-    final_prompt: Optional[str]
-    generated_code: Optional[str]
-
-def stream_claude(prompt: str):
-    try:
-        payload = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 4000,
-            "temperature": 0,
-            "top_p": 1.0,
-            "top_k": 1,
-        }
-        resp = bedrock.invoke_model_with_response_stream(
-            modelId=("arn:aws:bedrock:us-east-1:137360334857:"
-                     "inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"),
-            body=json.dumps(payload),
-        )
-        for event in resp["body"]:
-            chunk = json.loads(event["chunk"]["bytes"])
-            if delta := chunk.get("delta"):
-                if text := delta.get("text"):
-                    yield text
-    except Exception as e:
-        st.error(f"Claude error: {e}")
-        st.stop()
-
-def save_uploaded_file(uploaded_file) -> tuple[str, str]:
-    path = os.path.join(os.getcwd(), uploaded_file.name)
+# ---------- helper: Excel upload ----------
+def save_file(uploaded):
+    path = os.path.join(os.getcwd(), uploaded.name)
     with open(path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+        f.write(uploaded.getbuffer())
+    # strip VBA if .xlsm, otherwise keep as-is
     if path.lower().endswith(".xlsm"):
         wb = openpyxl.load_workbook(path, keep_vba=False)
-        no_macro = os.path.splitext(path)[0] + ".xlsx"
-        wb.save(no_macro)
+        new_path = os.path.splitext(path)[0] + ".xlsx"
+        wb.save(new_path)
         os.remove(path)
-        return no_macro, os.path.splitext(uploaded_file.name)[0]
-    return path, os.path.splitext(uploaded_file.name)[0]
+        return new_path
+    return path
 
-def extract_vba(state: VBAState) -> VBAState:
-    with st.spinner("Extracting VBA..."):
-        parser = VBA_Parser(state["file_path"])
-        modules = [code.strip() for _, _, _, code in parser.extract_macros() if code.strip()]
-        if not modules:
-            st.error("No VBA macros found.")
-            st.stop()
-        state["vba_code"] = "\n\n".join(modules)
-    with st.expander("Step 1: Extracted VBA code"):
-        st.code(state["vba_code"], language="text")
-    progress.progress(20)
-    return state
+# ---------- helper: extract VBA ----------
+def extract_vba(file_path: str) -> str:
+    parser = VBA_Parser(file_path)
+    modules = [code for *_ , code in parser.extract_macros() if code.strip()]
+    return "\n\n".join(modules)
 
-def categorize_vba(state: VBAState) -> VBAState:
-    with st.spinner("Categorizing code..."):
-        prompt = "Classify this VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n" + state["vba_code"]
-        cat = "".join(stream_claude(prompt)).strip().lower()
-        state["category"] = cat if cat in PROMPTS else "normal_operations"
-    with st.expander("Step 2: Detected Category"):
-        st.markdown(f"**Category detected:** `{state['category']}`")
-    progress.progress(40)
-    return state
+# ---------- helper: embed with Titan ----------
+def titan_embed(text: str) -> List[float]:
+    payload = {"inputText": text}
+    resp = bedrock.invoke_model(
+        modelId     = EMBED_MODEL_ID,
+        body        = json.dumps(payload),
+        contentType = "application/json",
+        accept      = "application/json",
+    )
+    return json.loads(resp["body"].read())["embedding"]
 
-def embed_reference(state: VBAState) -> VBAState:
-    with st.spinner("Step 3: Checking similar references..."):
-        match = find_best_reference(state["vba_code"])
-        if match:
-            state["final_prompt"] = f"Use this structure as reference:\n{match}\n\nNow convert this:\n{state['vba_code']}"
-        else:
-            state["final_prompt"] = PROMPTS[state["category"]].format(vba_code=state["vba_code"])
-    with st.expander("Step 3: AI Prompt"):
-        st.code(state["final_prompt"], language="text")
-    progress.progress(60)
-    return state
+# ---------- Streamlit UI ----------
+st.set_page_config("Macro → Titan Embeddings", layout="wide")
+st.title("📐 Titan v2 Embedding Demo for VBA Macros")
 
-def generate_python_code(state: VBAState) -> VBAState:
-    with st.spinner("Generating Python code..."):
-        full = "".join(stream_claude(state["final_prompt"]))
-        code = full
-        if "```python" in full:
-            s = full.find("```python") + len("```python")
-            e = full.find("```", s)
-            code = full[s:e].strip()
-        state["generated_code"] = code
-    with st.expander("Step 4: Generated Code"):
-        st.code(code, language="python")
-    if st.button("✅ Looks Good"):
-        save_reference(state["vba_code"], code)
-        update_reference_feedback(state["vba_code"], True)
-        st.success("Saved as reference.")
-    elif st.button("❌ Needs Fixing"):
-        update_reference_feedback(state["vba_code"], False)
-        st.warning("Feedback noted.")
-    py_path = os.path.splitext(st.session_state['xlsx_path'])[0] + ".py"
-    try:
-        with open(py_path, "w") as f:
-            f.write(code)
-        st.markdown(f"**Saved Python code at:** `{py_path}`")
-    except Exception as e:
-        st.error(f"Error saving Python file: {e}")
-    progress.progress(80)
-    return state
+uploaded = st.file_uploader("Upload Excel file (.xlsm, .xlsb, .xls)")
 
-def build_graph():
-    steps = [extract_vba, categorize_vba, embed_reference, generate_python_code]
-    g = StateGraph(VBAState)
-    for fn in steps:
-        g.add_node(fn.__name__, fn)
-    g.set_entry_point(steps[0].__name__)
-    for a, b in zip(steps, steps[1:]):
-        g.add_edge(a.__name__, b.__name__)
-    g.add_edge(steps[-1].__name__, END)
-    return g.compile()
+if uploaded:
+    # Save & extract VBA
+    saved_path = save_file(uploaded)
+    with st.spinner("Extracting VBA macros…"):
+        vba_text = extract_vba(saved_path)
 
-st.set_page_config(page_title="VBA2PyGen", layout="wide")
-st.markdown("""
-<style>
-  body {background:#0e1117; color:#c7d5e0}
-  .stTextArea textarea, .stTextInput input {background:#1e222d; color:#c7d5e0}
-</style>
-""", unsafe_allow_html=True)
-st.title("VBA2PyGen")
-st.markdown("Upload your Excel file")
-progress = st.progress(0)
+    if not vba_text:
+        st.error("No VBA macros found.")
+        st.stop()
 
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm","xlsb","xls"])
-if not uploaded_file:
-    st.session_state.pop("generated_code", None)
-    st.session_state.pop("xlsx_path", None)
-    st.info("Please upload a file to continue.")
-    st.stop()
+    st.subheader("Extracted VBA")
+    st.code(vba_text[:1500] + (" …" if len(vba_text) > 1500 else ""), language="vb")
 
-xlsx_path, base_name = save_uploaded_file(uploaded_file)
-st.session_state['xlsx_path'] = xlsx_path
-st.markdown(f"**Macro-stripped copy:** `{xlsx_path}`")
+    # Embed
+    with st.spinner("Calling Titan Text Embeddings v2…"):
+        vector = titan_embed(vba_text)
 
-if "generated_code" not in st.session_state:
-    st.session_state["generated_code"] = None
+    st.subheader("Titan v2 Embedding (first 50 dims)")
+    st.write(vector[:50])
+    st.caption(f"Vector length: {len(vector)}")
 
-if st.session_state["generated_code"] is None:
-    suffix = os.path.splitext(uploaded_file.name)[1]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getbuffer())
-        tmp_path = tmp.name
-    graph = build_graph()
-    for state in graph.stream({"file_path": tmp_path}):
-        final = state
-    st.success("✅ Conversion completed!")
 else:
-    st.success("✅ Already processed.")
+    st.info("Upload a macro-enabled workbook to begin.")
