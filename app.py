@@ -1,257 +1,277 @@
-import os
-import json
-import tempfile
-import sqlite3
-from typing import TypedDict, Optional
+# ----------------- standard libs ------------------
+import os, json, tempfile, sqlite3, math
+from typing import TypedDict, Optional, List
 
-import openpyxl
-import pandas as pd
-import streamlit as st
-import boto3
+# ----------------- 3rd-party libs -----------------
+import openpyxl                 # Excel I/O
+import streamlit as st          # UI
+import boto3                    # Bedrock
+import numpy as np              # cosine sim
 from oletools.olevba import VBA_Parser
 from langgraph.graph import StateGraph, END
 
-# === EMBEDDING + REFERENCE STORAGE ===
-db_path = "reference_store.db"
+# ----------------- CONSTANTS ----------------------
+DB_PATH   = "macro_references.db"
+EMB_MODEL = "amazon.titan-embed-text-v2"
+CLAUDE_ID = (
+    "arn:aws:bedrock:us-east-1:137360334857:"
+    "inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+)
 
-def init_db():
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS references (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                macro TEXT NOT NULL,
-                embedding BLOB NOT NULL,
-                python_code TEXT NOT NULL,
-                score INTEGER DEFAULT 0
-            )
-        """)
-init_db()
+# ---------- PROMPTS (unchanged – cropped for brevity) ----------
+PROMPTS = {
+    "pivot_table": """I have the following VBA code that creates a Pivot Table in Excel:
+{vba_code}
 
+Please write equivalent Python code that:
+• Produces the same summarized data (group-by, SUM, COUNT…)
+• Uses pandas (pivot_table or groupby)
+• Writes the table back to the workbook (pandas.ExcelWriter or openpyxl)
+Do NOT create a real Excel PivotTable and do NOT call unsupported APIs.
+""",
+
+    "pivot_chart": """I have the following VBA code that creates a Pivot Chart in Excel:
+{vba_code}
+
+Generate Python that:
+• Summarises the data with pandas (matching the PivotTable)
+• Plots the same chart type using matplotlib / seaborn / plotly
+• Does not call openpyxl chart APIs that don’t exist
+""",
+
+    "user_form": """I have the following VBA code that creates / handles a UserForm:
+{vba_code}
+
+Create Python that:
+• Replicates the form flow with Tkinter or PyQt5
+• Captures input and writes to Excel via pandas / openpyxl
+• Uses only real libraries; self-contained & runnable
+""",
+
+    "formula": """I have the following VBA or formula code:
+{vba_code}
+
+Generate Python that:
+• Replicates the calculations with pandas / numpy
+• Reads the sheet via pandas.read_excel or openpyxl
+• Computes in Python (DO NOT embed formulas) then writes results back
+""",
+
+    "normal_operations": """I have the following VBA code that performs normal Excel ops:
+{vba_code}
+
+Create Python that:
+• Performs the same inserts / deletes / formatting with openpyxl / pandas
+• Uses openpyxl.styles for formatting
+• No fake / missing APIs; fully runnable
+"""
+}
+
+# ----------------- Bedrock client -----------------
 bedrock = boto3.client("bedrock-runtime")
 
-def get_embedding(text: str) -> list[float]:
-    payload = {
-        "inputText": text,
-        "embeddingConfig": {"outputEmbeddingLength": 1536}
-    }
-    response = bedrock.invoke_model(
-        modelId="amazon.titan-embed-text-v2",
-        contentType="application/json",
-        accept="application/json",
-        body=json.dumps(payload),
-    )
-    embedding = json.loads(response['body'].read())['embedding']
-    return embedding
+# ========= SQLite helpers (table name NOT reserved) =========
+def init_db() -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS macro_refs (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                category      TEXT    NOT NULL,
+                vba_code      TEXT    NOT NULL,
+                python_code   TEXT    NOT NULL,
+                embedding     TEXT    NOT NULL,
+                upvotes       INTEGER DEFAULT 1,
+                downvotes     INTEGER DEFAULT 0
+            )
+            """
+        )
 
-def cosine_similarity(a, b):
-    import numpy as np
+def get_embedding(text: str) -> List[float]:
+    body = json.dumps({"inputText": text})
+    resp = bedrock.invoke_model(
+        modelId   = EMB_MODEL,
+        body      = body,
+        contentType = "application/json",
+        accept      = "application/json",
+    )
+    return json.loads(resp["body"].read())["embedding"]
+
+def cosine(a: List[float], b: List[float]) -> float:
     a, b = np.array(a), np.array(b)
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
-def find_best_reference(vba_code):
+def best_reference(vba_code: str, category: str):
     query_vec = get_embedding(vba_code)
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute("SELECT id, macro, embedding, python_code, score FROM references")
-        best_id, best_code, best_score = None, None, -1
-        for rid, macro, emb_blob, py_code, score in cur.fetchall():
-            try:
-                ref_vec = json.loads(emb_blob)
-                sim = cosine_similarity(query_vec, ref_vec)
-                if sim > 0.90 and score >= best_score:
-                    best_id, best_code, best_score = rid, py_code, score
-            except: pass
-    return best_code
+    best_row, best_sim = None, 0.87  # threshold
+    with sqlite3.connect(DB_PATH) as conn:
+        for row in conn.execute(
+            "SELECT id, vba_code, python_code, embedding, upvotes, downvotes "
+            "FROM macro_refs WHERE category=?", (category,)
+        ):
+            emb = json.loads(row[3])
+            sim = cosine(query_vec, emb)
+            if sim > best_sim:
+                best_sim, best_row = sim, row
+    return best_row  # or None
 
-def save_reference(macro, python_code):
-    embedding = get_embedding(macro)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("INSERT INTO references (macro, embedding, python_code, score) VALUES (?, ?, ?, 1)",
-                     (macro, json.dumps(embedding), python_code))
-
-def update_reference_feedback(macro, is_good: bool):
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute("SELECT id FROM references WHERE macro=? ORDER BY id DESC LIMIT 1", (macro,))
-        row = cur.fetchone()
-        if row:
-            rid = row[0]
-            conn.execute("UPDATE references SET score = score + ? WHERE id=?", (1 if is_good else -1, rid))
-
-# === PROMPTS ===
-PROMPTS = {
-    "pivot_table": """I have the following VBA code that creates a Pivot Table in Excel:\n{vba_code} ...""",
-    "pivot_chart": """I have the following VBA code that creates a Pivot Chart in Excel:\n{vba_code} ...""",
-    "user_form": """I have the following VBA code that creates and handles a UserForm in Excel: \n{vba_code} ...""",
-    "formula": """I have the following VBA or Excel formula-based code:\n{vba_code} ...""",
-    "normal_operations": """I have the following VBA code that performs normal Excel operations (like inserting rows, copying values, deleting columns, formatting cells, renaming sheets, etc.):\n{vba_code} ...""",
-}
-
-class VBAState(TypedDict):
-    file_path: Optional[str]
-    vba_code: Optional[str]
-    category: Optional[str]
-    final_prompt: Optional[str]
-    generated_code: Optional[str]
-
-def stream_claude(prompt: str):
-    try:
-        payload = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 4000,
-            "temperature": 0,
-            "top_p": 1.0,
-            "top_k": 1,
-        }
-        resp = bedrock.invoke_model_with_response_stream(
-            modelId=("arn:aws:bedrock:us-east-1:137360334857:"
-                     "inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"),
-            body=json.dumps(payload),
+def save_reference(cat: str, vba: str, py: str) -> None:
+    emb = get_embedding(vba)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO macro_refs (category, vba_code, python_code, embedding)"
+            " VALUES (?, ?, ?, ?)",
+            (cat, vba, py, json.dumps(emb))
         )
-        for event in resp["body"]:
-            chunk = json.loads(event["chunk"]["bytes"])
-            if delta := chunk.get("delta"):
-                if text := delta.get("text"):
-                    yield text
-    except Exception as e:
-        st.error(f"Claude error: {e}")
-        st.stop()
 
-def save_uploaded_file(uploaded_file) -> tuple[str, str]:
-    path = os.path.join(os.getcwd(), uploaded_file.name)
+def vote(ref_id: int, good: bool) -> None:
+    col = "upvotes" if good else "downvotes"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(f"UPDATE macro_refs SET {col}={col}+1 WHERE id=?", (ref_id,))
+
+# ----------------- Claude streaming -----------------
+def stream_claude(prompt: str):
+    payload = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 4000,
+        "temperature": 0,
+        "top_p": 1.0,
+        "top_k": 1,
+    }
+    resp = bedrock.invoke_model_with_response_stream(
+        modelId = CLAUDE_ID,
+        body    = json.dumps(payload),
+    )
+    for event in resp["body"]:
+        chunk = json.loads(event["chunk"]["bytes"])
+        if delta := chunk.get("delta"):
+            if text := delta.get("text"):
+                yield text
+
+# ----------------- LangGraph state -----------------
+class VBAState(TypedDict):
+    file_path     : Optional[str]
+    vba_code      : Optional[str]
+    category      : Optional[str]
+    final_prompt  : Optional[str]
+    generated_code: Optional[str]
+    ref_id        : Optional[int]
+
+# ----------------- Helper: save uploaded file ---------------
+def save_file(uploaded):
+    path = os.path.join(os.getcwd(), uploaded.name)
     with open(path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+        f.write(uploaded.getbuffer())
     if path.lower().endswith(".xlsm"):
         wb = openpyxl.load_workbook(path, keep_vba=False)
-        no_macro = os.path.splitext(path)[0] + ".xlsx"
-        wb.save(no_macro)
+        new_path = os.path.splitext(path)[0] + ".xlsx"
+        wb.save(new_path)
         os.remove(path)
-        return no_macro, os.path.splitext(uploaded_file.name)[0]
-    return path, os.path.splitext(uploaded_file.name)[0]
+        return new_path
+    return path
 
+# ------------- LangGraph step 1: extract VBA ----------------
 def extract_vba(state: VBAState) -> VBAState:
     with st.spinner("Extracting VBA..."):
-        parser = VBA_Parser(state["file_path"])
-        modules = [code.strip() for _, _, _, code in parser.extract_macros() if code.strip()]
+        parser  = VBA_Parser(state["file_path"])
+        modules = [c.strip() for *_, c in parser.extract_macros() if c.strip()]
         if not modules:
-            st.error("No VBA macros found.")
-            st.stop()
+            st.error("No VBA macros found."); st.stop()
         state["vba_code"] = "\n\n".join(modules)
-    with st.expander("Step 1: Extracted VBA code"):
-        st.code(state["vba_code"], language="text")
-    progress.progress(20)
+    st.expander("Step 1 – VBA").code(state["vba_code"])
+    prog.progress(20)
     return state
 
-def categorize_vba(state: VBAState) -> VBAState:
-    with st.spinner("Categorizing code..."):
-        prompt = "Classify this VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n" + state["vba_code"]
-        cat = "".join(stream_claude(prompt)).strip().lower()
-        state["category"] = cat if cat in PROMPTS else "normal_operations"
-    with st.expander("Step 2: Detected Category"):
-        st.markdown(f"**Category detected:** `{state['category']}`")
-    progress.progress(40)
+# ------------- LangGraph step 2: classify -------------------
+def classify(state: VBAState) -> VBAState:
+    user_prompt = (
+        "Classify the following VBA into formulas, pivot_table, pivot_chart, "
+        "user_form, normal_operations. Return only the word.\n\n" + state["vba_code"]
+    )
+    cat = "".join(stream_claude(user_prompt)).strip().lower()
+    state["category"] = cat if cat in PROMPTS else "normal_operations"
+    st.expander("Step 2 – Category").markdown(f"`{state['category']}`")
+    prog.progress(40)
     return state
 
+# ------------- LangGraph step 3: build prompt ---------------
 def build_prompt(state: VBAState) -> VBAState:
-    match = find_best_reference(state["vba_code"])
-    if match:
-        state["final_prompt"] = f"Use the same structure as this good Python code for similar macro:\n{match}\n\nNow convert this:\n{state['vba_code']}"
+    ref = best_reference(state["vba_code"], state["category"])
+    if ref:
+        ref_id, ref_vba, ref_py, *_ = ref
+        state["ref_id"] = ref_id
+        state["final_prompt"] = (
+            "Here is a high-quality example of converting a similar macro:\n\n"
+            f"Macro:\n{ref_vba}\n\nPython:\n{ref_py}\n\n"
+            "Now convert the following macro to Python, following the same style. "
+            "Do NOT repeat the old macro.\n\n"
+            + state["vba_code"]
+        )
+        st.info("📎 Using reference example")
     else:
+        state["ref_id"] = None
         state["final_prompt"] = PROMPTS[state["category"]].format(vba_code=state["vba_code"])
-    with st.expander("Step 3: AI Prompt"):
-        st.code(state["final_prompt"], language="text")
-    progress.progress(60)
+    st.expander("Step 3 – Prompt").code(state["final_prompt"])
+    prog.progress(60)
     return state
 
-def generate_python_code(state: VBAState) -> VBAState:
-    with st.spinner("Generating Python code..."):
+# ------------- LangGraph step 4: generate -------------------
+def generate(state: VBAState) -> VBAState:
+    with st.spinner("Claude generating…"):
         full = "".join(stream_claude(state["final_prompt"]))
-        code = full
-        if "```python" in full:
-            s = full.find("```python") + len("```python")
-            e = full.find("```", s)
-            code = full[s:e].strip()
-        state["generated_code"] = code
-    with st.expander("Step 4: Generated Code"):
-        st.code(code, language="python")
-    if st.button("✅ Looks Good"):
-        save_reference(state["vba_code"], code)
-        update_reference_feedback(state["vba_code"], True)
-        st.success("Saved as reference.")
-    elif st.button("❌ Needs Fixing"):
-        update_reference_feedback(state["vba_code"], False)
-        st.warning("Feedback noted.")
-    py_path = os.path.splitext(st.session_state['xlsx_path'])[0] + ".py"
-    try:
-        with open(py_path, "w") as f:
-            f.write(code)
-        st.markdown(f"**Saved Python code at:** `{py_path}`")
-    except Exception as e:
-        st.error(f"Error saving Python file: {e}")
-    progress.progress(80)
+    code = full
+    if "```python" in full:
+        s = full.find("```python") + 9
+        e = full.find("```", s)
+        code = full[s:e].strip()
+    state["generated_code"] = code
+    st.expander("Step 4 – Python").code(code, language="python")
+
+    # feedback buttons
+    good = st.button("✅ Correct")
+    bad  = st.button("❌ Incorrect")
+    if good or bad:
+        if state["ref_id"]:
+            vote(state["ref_id"], good)
+        if good:
+            save_reference(state["category"], state["vba_code"], code)
+        st.experimental_rerun()
+
+    # save file
+    py_path = os.path.splitext(st.session_state["xlsx_path"])[0] + ".py"
+    with open(py_path, "w") as f: f.write(code)
+    st.success(f"Saved → `{py_path}`")
+    prog.progress(85)
     return state
 
-def build_graph():
-    steps = [extract_vba, categorize_vba, build_prompt, generate_python_code]
+# ------------- Build LangGraph ------------------------------
+def graph():
     g = StateGraph(VBAState)
-    for fn in steps:
+    for fn in (extract_vba, classify, build_prompt, generate):
         g.add_node(fn.__name__, fn)
-    g.set_entry_point(steps[0].__name__)
-    for a, b in zip(steps, steps[1:]):
-        g.add_edge(a.__name__, b.__name__)
-    g.add_edge(steps[-1].__name__, END)
+    g.set_entry_point("extract_vba")
+    g.add_edge("extract_vba", "classify")
+    g.add_edge("classify", "build_prompt")
+    g.add_edge("build_prompt", "generate")
+    g.add_edge("generate", END)
     return g.compile()
 
-st.set_page_config(page_title="VBA2PyGen", layout="wide")
-st.markdown("""
-<style>
-  body {background:#0e1117; color:#c7d5e0}
-  .stTextArea textarea, .stTextInput input {background:#1e222d; color:#c7d5e0}
-</style>
-""", unsafe_allow_html=True)
-st.title("VBA2PyGen")
-st.markdown("Upload your Excel file")
-progress = st.progress(0)
+# ----------------- Streamlit UI -----------------------------
+st.set_page_config("VBA2PyGen", layout="wide")
+st.title("🧩 VBA → Python Generator (Bedrock + Titan v2)")
 
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsm","xlsb","xls"])
-if not uploaded_file:
-    st.session_state.pop("generated_code", None)
-    st.session_state.pop("xlsx_path", None)
-    st.info("Please upload a file to continue.")
-    st.stop()
+prog = st.progress(0)
+uploaded = st.file_uploader("Upload .xlsm / .xlsb / .xls workbook", type=["xlsm","xlsb","xls"])
+if not uploaded: st.stop()
 
-xlsx_path, base_name = save_uploaded_file(uploaded_file)
-st.session_state['xlsx_path'] = xlsx_path
-st.markdown(f"**Macro-stripped copy:** `{xlsx_path}`")
+xlsx_path = save_file(uploaded)
+st.session_state["xlsx_path"] = xlsx_path
+st.caption(f"Macro-stripped copy saved at `{xlsx_path}`")
 
-if "generated_code" not in st.session_state:
-    st.session_state["generated_code"] = None
+init_db()  # ensure table exists
 
-if st.session_state["generated_code"] is None:
-    suffix = os.path.splitext(uploaded_file.name)[1]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getbuffer())
-        tmp_path = tmp.name
-    graph = build_graph()
-    for state in graph.stream({"file_path": tmp_path}):
-        final = state
-    st.success("✅ Conversion completed!")
-else:
-    st.success("✅ Already processed.")
-
-
-
-
-
-
-
-sqlite3.OperationalError: near "references": syntax error
-Traceback:
-File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\streamlit\runtime\scriptrunner\exec_code.py", line 121, in exec_func_with_error_handling
-    result = func()
-             ^^^^^^
-File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\streamlit\runtime\scriptrunner\script_runner.py", line 640, in code_to_exec
-    exec(code, module.__dict__)
-File "C:\Users\arpapate\Desktop\Generate_macro_prompt\test.py", line 28, in <module>
-    init_db()
-File "C:\Users\arpapate\Desktop\Generate_macro_prompt\test.py", line 19, in init_db
-    conn.execute("""
+workflow = graph()
+for _state in workflow.stream({"file_path": xlsx_path}):
+    pass  # LangGraph yields intermediate states but we only need end
+st.success("✅ Done!  You can upload another file when ready.")
