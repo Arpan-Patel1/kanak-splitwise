@@ -95,6 +95,7 @@ class VBAState(TypedDict):
     final_prompt: Optional[str]
     generated_code: Optional[str]
 
+
 def save_uploaded_file(uploaded_file) -> tuple[str, str]:
     path = os.path.join(os.getcwd(), uploaded_file.name)
     with open(path, "wb") as f:
@@ -106,6 +107,7 @@ def save_uploaded_file(uploaded_file) -> tuple[str, str]:
         os.remove(path)
         return no_macro, os.path.splitext(uploaded_file.name)[0]
     return path, os.path.splitext(uploaded_file.name)[0]
+
 
 def extract_vba(state: VBAState) -> VBAState:
     with st.spinner("Extracting VBA..."):
@@ -120,11 +122,12 @@ def extract_vba(state: VBAState) -> VBAState:
     progress.progress(20)
     return state
 
+
 def categorize_vba(state: VBAState) -> VBAState:
     with st.spinner("Categorizing code..."):
         prompt = (
-            "Classify the following VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations."  
-            "Return only the category." + state["vba_code"]
+            "Classify the following VBA code into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Return only the category.\n\n"
+            + state["vba_code"]
         )
         cat = "".join(stream_claude(prompt)).strip().lower()
         state["category"] = cat if cat in PROMPTS else "normal_operations"
@@ -133,12 +136,14 @@ def categorize_vba(state: VBAState) -> VBAState:
     progress.progress(40)
     return state
 
+
 def build_prompt(state: VBAState) -> VBAState:
     state["final_prompt"] = PROMPTS[state["category"]].format(vba_code=state["vba_code"])
     with st.expander("Step 3: AI Prompt"):
         st.code(state["final_prompt"], language="text")
     progress.progress(60)
     return state
+
 
 def generate_python_code(state: VBAState) -> VBAState:
     with st.spinner("Generating Python code..."):
@@ -149,54 +154,14 @@ def generate_python_code(state: VBAState) -> VBAState:
             e = full.find("```", s)
             code = full[s:e].strip()
         state["generated_code"] = code
-    with st.expander("Step 4: Generated Code before fix"):
+    with st.expander("Step 4: Generated Code"):
         st.code(code, language="python")
     progress.progress(80)
     return state
 
-def verify_and_fix_code(state: VBAState) -> VBAState:
-    code = state.get("generated_code", "")
-    xlsx_file = os.path.basename(st.session_state['xlsx_path'])
-    vba_context = state["vba_code"]
-
-    fix_prompt = (
-        "you are a Python Code validation agent."
-        "You are given:\n"
-        f"VBA Macros:\n{vba_context}\n\n"
-        f"Generated Python Code:\n```python\n{code}\n```"
-        "Only fix the python code if it is broken or does NOT match the macro logic."
-        "If the code is already correct, return it as-is."
-        "Do NOT optimize, reformat, remane, or alter logic that already works."
-        f"Use only real libraries and replace file paths with '{xlsx_file}'.\n\n"
-        "Only return corrected code - no explaination."
-    )
-
-    acc = ""
-    with st.spinner("Applying direct code fixes..."):
-        for chunk in stream_claude(fix_prompt):
-            acc += chunk
-
-    if "```python" in acc:
-        s = acc.find("```python") + len("```python")
-        e = acc.find("```", s)
-        final_code = acc[s:e].strip()
-    else:
-        final_code = acc.strip()
-
-    state["generated_code"] = final_code
-    with st.expander("Step 5: Final Corrected Code"):
-        st.code(final_code, language="python")
-
-    py_path = os.path.splitext(st.session_state['xlsx_path'])[0] + ".py"
-    with open(py_path, "w") as f:
-        f.write(final_code)
-
-    st.markdown(f"**Saved Python at:** `{py_path}`")
-    progress.progress(100)
-    return state
 
 def build_graph():
-    steps = [extract_vba, categorize_vba, build_prompt, generate_python_code, verify_and_fix_code]
+    steps = [extract_vba, categorize_vba, build_prompt, generate_python_code]
     g = StateGraph(VBAState)
     for fn in steps:
         g.add_node(fn.__name__, fn)
@@ -205,6 +170,7 @@ def build_graph():
         g.add_edge(a.__name__, b.__name__)
     g.add_edge(steps[-1].__name__, END)
     return g.compile()
+
 
 st.set_page_config(page_title="VBA2PyGen", layout="wide")
 st.markdown("""
@@ -239,6 +205,6 @@ if st.session_state["generated_code"] is None:
     graph = build_graph()
     for state in graph.stream({"file_path": tmp_path}):
         final = state
-    st.success("✅ Conversion & AI Auto-Fix completed!")
+    st.success("✅ Conversion completed!")
 else:
     st.success("✅ Already processed.")
