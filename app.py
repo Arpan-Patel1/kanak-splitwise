@@ -127,9 +127,10 @@ if "voted" not in st.session_state:
 # Determine if processing is needed
 should_process = (st.session_state["processed_file_id"] != file_id) and not st.session_state["voted"]
 
+# Main processing wrapped in a single spinner
 if should_process:
-    # Step 1: Extract VBA
-    with st.spinner("Extracting VBA..."):
+    with st.spinner("Processing VBA to Python..."):
+        # Step 1: Extract VBA
         suffix = os.path.splitext(file_id)[1]
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         tmp.write(uploaded_file.getbuffer())
@@ -143,12 +144,11 @@ if should_process:
             st.error("No VBA macros found.")
             st.stop()
         vba_code = "\n\n".join(modules)
-        with st.expander("Extracted VBA code"):
+        with st.expander("Extracted VBA Code"):
             st.code(vba_code, language="vb")
-    progress.progress(20)
+        progress.progress(20)
 
-    # Step 2: Embedding & Match
-    with st.spinner("Generating embedding and finding match..."):
+        # Step 2: Embedding & Match
         emb = get_embedding(vba_code)
         match = find_best_match(emb)
         if match:
@@ -157,20 +157,16 @@ if should_process:
                 st.code(match['vba_macro'], language="vb")
             with st.expander("Matched Python Code"):
                 st.code(match['generated_code'], language="python")
-        else:
-            match = None
-    progress.progress(50)
+        progress.progress(50)
 
-    # Step 3: Categorize
-    with st.spinner("Categorizing VBA..."):
+        # Step 3: Categorize
         cat_prompt = "Classify into: formulas, pivot_table, pivot_chart, user_form, normal_operations. Only return category.\n\n" + vba_code
-        cat = "".join(stream_claude(cat_prompt)).strip().lower()
-        category = cat if cat in PROMPTS else "normal_operations"
+        category = "".join(stream_claude(cat_prompt)).strip().lower()
+        category = category if category in PROMPTS else "normal_operations"
         st.markdown(f"**Detected Category:** `{category}`")
-    progress.progress(70)
+        progress.progress(70)
 
-    # Step 4: Generate Python code
-    with st.spinner("Generating Python code..."):
+        # Step 4: Generate Python Code
         final_prompt = PROMPTS[category].format(vba_code=vba_code)
         with st.expander("Prompt Used"):
             st.code(final_prompt, language="text")
@@ -183,17 +179,17 @@ if should_process:
             gen_code = full.strip()
         with st.expander("Generated Python Code"):
             st.code(gen_code, language="python")
-    progress.progress(100)
+        progress.progress(100)
 
-    # Persist state
-    state = VBAState(vba_code=vba_code, category=category, embedding=emb, match=match, generated_code=gen_code)
-    st.session_state["vba_state"] = state
-    st.session_state["processed_file_id"] = file_id
+        # Persist state
+        state = VBAState(vba_code=vba_code, category=category, embedding=emb, match=match, generated_code=gen_code)
+        st.session_state["vba_state"] = state
+        st.session_state["processed_file_id"] = file_id
 
 # Reuse state if available
 state = st.session_state.get("vba_state")
 if state and not should_process:
-    with st.expander("Extracted VBA code"):
+    with st.expander("Extracted VBA Code"):
         st.code(state["vba_code"], language="vb")
     if state.get("match"):
         st.markdown(f"**Reference Found:** `{state['match']['name']}` — `{round(state['match']['score']*100,2)}%`")
@@ -205,14 +201,13 @@ if state and not should_process:
     with st.expander("Generated Python Code"):
         st.code(state['generated_code'], language="python")
 
-# Voting UI
-if not st.session_state["voted"]:
-    col1, col2 = st.columns(2)
-    if col1.button("👍 Save result (Helpful)"):
-        store_result(file_id, state["vba_code"], state["category"], state["embedding"], state["generated_code"], 1)
-        st.session_state["voted"] = True
-        st.success("Stored with 👍 feedback")
-    if col2.button("👎 Save result (Not Helpful)"):
-        store_result(file_id, state["vba_code"], state["category"], state["embedding"], state["generated_code"], -1)
-        st.session_state["voted"] = True
-        st.success("Stored with 👎 feedback")
+# Voting UI — both buttons disable together after click
+col1, col2 = st.columns(2)
+if col1.button("👍 Save result (Helpful)", disabled=st.session_state["voted"]):
+    store_result(file_id, state["vba_code"], state["category"], state["embedding"], state["generated_code"], 1)
+    st.session_state["voted"] = True
+    st.success("Stored with 👍 feedback")
+if col2.button("👎 Save result (Not Helpful)", disabled=st.session_state["voted"]):
+    store_result(file_id, state["vba_code"], state["category"], state["embedding"], state["generated_code"], -1)
+    st.session_state["voted"] = True
+    st.success("Stored with 👎 feedback")
