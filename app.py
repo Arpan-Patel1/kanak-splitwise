@@ -331,22 +331,3 @@ col2.button(
     on_click=downvote,
     disabled=st.session_state['voted']
 )
-
-
-
-
-
-
-
-
-
-
-TypeError: 'NoneType' object is not subscriptable
-Traceback:
-File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\streamlit\runtime\scriptrunner\exec_code.py", line 121, in exec_func_with_error_handling
-    result = func()
-             ^^^^^^
-File "C:\Users\arpapate\Desktop\Generate_macro_prompt\.venv\Lib\site-packages\streamlit\runtime\scriptrunner\script_runner.py", line 640, in code_to_exec
-    exec(code, module.__dict__)
-File "C:\Users\arpapate\Desktop\Generate_macro_prompt\test.py", line 265, in <module>
-    prompt_text = PROMPTS[category].format(vba_code=vba_code) + "\n\nUse This Code Python Code:\n" + match['generated_code'] + f"\n\nThis code is `{match['score']*100:.1f}%` Accurate of what we want."
