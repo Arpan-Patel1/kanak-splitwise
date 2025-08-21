@@ -21,14 +21,11 @@ from openpyxl import load_workbook
 # ==============================
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(APP_DIR, "macro_embeddings.db")
-OUTPUT_ROOT = os.path.join(APP_DIR, "outputs")
-os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
 REGION = "us-east-1"
 bedrock = boto3.client("bedrock-runtime", region_name=REGION)
 
 EMBED_MODEL_ID = "amazon.titan-embed-text-v2:0"
-# Replace with your Bedrock Claude model/inference profile if different:
 CLAUDE_MODEL_ID = "arn:aws:bedrock:us-east-1:137360334857:inference-profile/us.anthropic.claude-3-7-sonnet-20250219-v1:0"
 
 PROMPTS = {
@@ -60,7 +57,7 @@ PROMPTS = {
         "- Only real imports; single-file code.\n\n"
         "Here is the VBA code:\n{vba_code}"
     ),
-    # NOTE: use "formulas" (plural) key to match classifier aliasing below.
+    # NOTE: use "formulas" (plural) key to match aliasing below.
     "formulas": (
         "I have the following VBA or Excel formulas:\n{vba_code}\n"
         "Generate Python that:\n"
@@ -108,7 +105,6 @@ def init_db():
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """)
-    # add missing columns if upgrading
     try:
         conn.execute("ALTER TABLE macro_matches ADD COLUMN name_hash TEXT")
     except sqlite3.OperationalError:
@@ -134,7 +130,6 @@ def strip_comments(vba: str) -> str:
     return "\n".join(lines)
 
 def normalize_identifiers(code: str) -> str:
-    # light canonicalization to stabilize fingerprints & embeddings
     KEYWORDS = set(map(str.lower, """
         sub function end if then else elseif for next while wend do loop select case
         dim as set let get call with endwith public private const option explicit
@@ -241,25 +236,32 @@ def find_best_match(emb: List[float], category: str, threshold: float = 0.5) -> 
         return None
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute("SELECT id,name,vba_full,category,embedding,generated_code,feedback FROM macro_matches")
-    best, best_score, best_row = None, -1.0, None
+    best_row = None
+    best_cos = -1.0
+    best_adj = -1.0
     for row in cur:
         rid, name, vba_full, cat, emb_json, gen_code, fb = row
         try:
             old = json.loads(emb_json)
-            score = cosine_similarity(emb, old)
-            # prefer same category; give small boost if same
-            if cat == category:
-                score += 0.02
-            # tiny reinforcement by feedback
-            score *= (1.0 + 0.03 * (fb or 0))
-            if score > best_score:
-                best_score, best_row = score, row
+            cos = cosine_similarity(emb, old)  # raw cosine for percent
+            # adjusted score for tie-breaking (same-category preference + feedback)
+            adj = cos + (0.02 if cat == category else 0.0)
+            adj *= (1.0 + 0.03 * (fb or 0))
+            if adj > best_adj:
+                best_adj, best_cos, best_row = adj, cos, row
         except Exception:
             continue
     conn.close()
-    if best_row and best_score >= threshold:
+    if best_row and best_adj >= threshold:
         rid, name, vba_full, cat, emb_json, gen_code, fb = best_row
-        return {"id": rid, "name": name, "vba_macro": vba_full, "generated_code": gen_code, "score": float(best_score)}
+        return {
+            "id": rid,
+            "name": name,
+            "vba_macro": vba_full,
+            "generated_code": gen_code,
+            "cosine": float(best_cos),    # for percentage display
+            "score": float(best_adj)      # adjusted internal score
+        }
     return None
 
 # ==============================
@@ -271,16 +273,16 @@ class VBAState(TypedDict):
     embedding: List[float]
     match: Optional[dict]
     py_code: str
-    # artifacts
-    out_dir: Optional[str]
+    # saved artifacts paths
     py_path: Optional[str]
     xlsx_path: Optional[str]
+    db_row_id: Optional[int]
 
 # ==============================
 # === App ======================
 # ==============================
 st.set_page_config(page_title="VBA2PyGen (Cosine Matching)", layout="wide")
-st.title("🧠 VBA2PyGen — Cosine Matching (Clean)")
+st.title("🧠 VBA2PyGen — Cosine Matching (Direct Save)")
 
 uploaded_file = st.file_uploader("Upload Excel file (.xlsx / .xlsm recommended)")
 
@@ -320,7 +322,7 @@ if do_process:
             st.stop()
     progress.progress(20)
 
-    # Optional: short-circuit exact match by fingerprint
+    # Optional exact match by fingerprint
     fp = vba_fingerprint(vba_code)
     exact = lookup_exact_by_hash(fp)
 
@@ -342,14 +344,17 @@ if do_process:
     # Step 4: Find best reference (cosine only)
     match = None
     with st.spinner("Step 4: Searching prior references (cosine)..."):
-        # if exact match exists, treat it as a strong reference
         if exact:
             st.success("Exact match found from a previous run.")
-            match = {"id": exact[0], "name": file_id, "vba_macro": vba_code, "generated_code": exact[1], "score": 1.0}
+            # Treat as perfect cosine = 1.0 for % display
+            match = {"id": exact[0], "name": file_id, "vba_macro": vba_code,
+                     "generated_code": exact[1], "cosine": 1.0, "score": 1.0}
         else:
             match = find_best_match(emb_full, category, threshold=0.5)
+
         if match:
-            st.markdown(f"**Reference Found:** {match['name']} — score {match['score']:.2f}")
+            cos_pct = max(0.0, min(1.0, match.get("cosine", 0.0))) * 100.0
+            st.markdown(f"**Reference Found:** {match['name']} — **{cos_pct:.1f}%** match")
             with st.expander("Matched VBA Macro"):
                 st.code(match["vba_macro"], language="vb")
             if match.get("generated_code"):
@@ -357,13 +362,24 @@ if do_process:
                     st.code(match["generated_code"], language="python")
         else:
             st.info("No similar macro found in database. Generating without reference.")
+            cos_pct = 0.0
     progress.progress(75)
 
-    # Step 5: Build prompt
+    # Step 5: Build prompt (inject similarity & change % after reference)
     with st.spinner("Step 5: Building prompt..."):
-        prompt_text = PROMPTS[category].format(vba_code=vba_code)
+        base_prompt = PROMPTS[category].format(vba_code=vba_code)
         if match and match.get("generated_code"):
-            prompt_text += "\n\nUse this Python code as reference:\n" + match["generated_code"]
+            sim_percent = max(0.0, min(1.0, match.get("cosine", 0.0))) * 100.0
+            change_percent = max(0.0, 100.0 - sim_percent)
+            prompt_text = (
+                base_prompt
+                + "\n\nUse this Python code as reference:\n"
+                + match["generated_code"]
+                + f"\n\nSimilarity estimate: {sim_percent:.1f}% of what we want; "
+                  f"approximately {change_percent:.1f}% needs to be adapted to fully match the uploaded macro."
+            )
+        else:
+            prompt_text = base_prompt
         with st.expander("Prompt Used"):
             st.code(prompt_text, language="text")
     progress.progress(85)
@@ -376,36 +392,28 @@ if do_process:
             st.code(py_code, language="python")
     progress.progress(92)
 
-    # Step 7: Save artifacts (.py + .xlsx replica w/o macros)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(OUTPUT_ROOT, f"{base_name}_{ts}")
-    os.makedirs(out_dir, exist_ok=True)
-
-    py_path = os.path.join(out_dir, f"{base_name}.py")
+    # Step 7: Save artifacts DIRECTLY to the working directory
+    # Save Python file: <base_name>.py in APP_DIR
+    py_path = os.path.join(APP_DIR, f"{base_name}.py")
     with open(py_path, "w", encoding="utf-8") as f:
         f.write(py_code)
 
-    xlsx_path = os.path.join(out_dir, f"{base_name}_replica.xlsx")
+    # Save Excel macro-free replica as <base_name>.xlsx in APP_DIR
+    xlsx_path = os.path.join(APP_DIR, f"{base_name}.xlsx")
     replica_ok = False
-    if ext.lower() in (".xlsx", ".xlsm"):
-        try:
-            wb = load_workbook(tmp_path, data_only=False, keep_vba=False)  # saving to .xlsx drops macros
-            wb.save(xlsx_path)
-            replica_ok = True
-        except Exception as e:
-            st.warning(f"Could not create macro-free .xlsx replica: {e}")
-    else:
-        st.warning("Replica only supported for .xlsx / .xlsm source files.")
+    try:
+        # Saving as .xlsx with keep_vba=False strips macros while keeping data/sheets
+        wb = load_workbook(tmp_path, data_only=False, keep_vba=False)
+        wb.save(xlsx_path)
+        replica_ok = True
+    except Exception as e:
+        # For non-xlsx/xlsm sources, openpyxl may fail; we still proceed.
+        st.warning(f"Could not create macro-free .xlsx replica: {e}")
 
-    st.subheader("Downloads")
-    with open(py_path, "rb") as f:
-        st.download_button("⬇️ Download Python (.py)", data=f.read(), file_name=os.path.basename(py_path), mime="text/x-python")
-    if replica_ok and os.path.exists(xlsx_path):
-        with open(xlsx_path, "rb") as f:
-            st.download_button("⬇️ Download Excel Replica (.xlsx, no macros)",
-                               data=f.read(),
-                               file_name=os.path.basename(xlsx_path),
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    # Report save locations
+    st.success(f"Saved Python file: {py_path}")
+    if replica_ok:
+        st.success(f"Saved Excel replica (macro-free): {xlsx_path}")
 
     progress.progress(100)
 
@@ -415,9 +423,9 @@ if do_process:
         embedding=emb_full,
         match=match,
         py_code=py_code,
-        out_dir=out_dir,
         py_path=py_path,
-        xlsx_path=xlsx_path if replica_ok else None
+        xlsx_path=xlsx_path if replica_ok else None,
+        db_row_id=None
     )
     st.session_state["processed_file_id"] = file_id
 
@@ -427,7 +435,8 @@ if state and not do_process:
     with st.expander("Extracted VBA Code"):
         st.code(state["vba_code"], language="vb")
     if state.get("match"):
-        st.markdown(f"**Reference (cached):** score {state['match'].get('score', 0):.2f}")
+        cos_pct = max(0.0, min(1.0, state["match"].get("cosine", 0.0))) * 100.0
+        st.markdown(f"**Reference (cached):** **{cos_pct:.1f}%** match")
         with st.expander("Matched VBA Macro"):
             st.code(state["match"]["vba_macro"], language="vb")
         if state["match"].get("generated_code"):
@@ -436,23 +445,16 @@ if state and not do_process:
     st.markdown(f"**Detected Category:** `{state['category']}`")
     with st.expander("Generated Python Code"):
         st.code(state["py_code"], language="python")
-
-    st.subheader("Downloads")
-    if state.get("py_path") and os.path.exists(state["py_path"]):
-        with open(state["py_path"], "rb") as f:
-            st.download_button("⬇️ Download Python (.py)", data=f.read(),
-                               file_name=os.path.basename(state["py_path"]), mime="text/x-python")
-    if state.get("xlsx_path") and state["xlsx_path"] and os.path.exists(state["xlsx_path"]):
-        with open(state["xlsx_path"], "rb") as f:
-            st.download_button("⬇️ Download Excel Replica (.xlsx, no macros)", data=f.read(),
-                               file_name=os.path.basename(state["xlsx_path"]),
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if state.get("py_path"):
+        st.info(f"Python file saved at: {state['py_path']}")
+    if state.get("xlsx_path"):
+        st.info(f"Excel replica saved at: {state['xlsx_path']}")
 
 # ==============================
 # === Voting ===================
 # ==============================
 def upvote():
-    parent_id = insert_record(
+    rid = insert_record(
         file_id,
         state["vba_code"],
         state["category"],
@@ -462,6 +464,7 @@ def upvote():
     )
     if state.get("match") and state["match"]:
         update_feedback(state["match"]["id"], +1)
+    state["db_row_id"] = rid
     st.session_state["voted"] = True
 
 def downvote():
@@ -473,4 +476,4 @@ col1, col2 = st.columns(2)
 col1.button("👍 Helpful", on_click=upvote, disabled=st.session_state["voted"] or not state)
 col2.button("👎 Not Helpful", on_click=downvote, disabled=st.session_state["voted"] or not state)
 
-st.caption("Cosine-only matching with Titan embeddings. Upvotes save this conversion and boost the matched reference; downvotes penalize it.")
+st.caption("Files are saved directly in this folder. Match shown as cosine percentage; the prompt includes how much likely needs adapting.")
