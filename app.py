@@ -5,31 +5,37 @@ Python 3.10+ (recommended; works with 3.9–3.12)
 
 Core Framework
 
-Streamlit (for UI, file upload, step-by-step workflow)
-
-LangGraph (StateGraph, END) → for orchestrating the workflow steps
+Streamlit (for UI / file upload / workflow)
 
 AI & Cloud
 
-AWS Bedrock (for LLM code generation)
+AWS Bedrock (for embeddings + LLM code generation)
 
-Anthropic Claude 3.7 Sonnet (via Bedrock inference profile) → for VBA → Python code generation and categorization
+Amazon Titan Embed Text v2 (amazon.titan-embed-text-v2:0) → for vector embeddings
+
+Anthropic Claude 3.7 Sonnet (via Bedrock inference profile) → for VBA → Python code generation
 
 Excel & VBA Handling
 
 oletools (olevba) → for extracting VBA macros from .xlsm, .xls, .xlsb
 
-openpyxl → for Excel reading/writing and creating macro-free .xlsx replicas
-
-pandas → used for data handling in generated Python code (e.g., formulas, pivot logic)
+openpyxl → for Excel reading/writing, sheet manipulation, formatting, and creating macro-free .xlsx replicas
 
 Database / Storage
 
-None in this version (all outputs saved as local files: .xlsx and .py)
+SQLite3 (local embedded DB)
 
-Math & Utility Libraries
+Stores VBA macros, embeddings, generated Python code, and user feedback (upvote/downvote)
 
-json, os, tempfile, typing → file handling, serialization, type hints
+Math & ML Utils
+
+NumPy → for cosine similarity on embeddings
+
+Other Standard Libraries
+
+hashlib → for fingerprinting (unique hash of VBA macros)
+
+re (regex), json, tempfile, os, datetime → for parsing, serialization, file handling
 
 📦 Python Module Versions (recommended stable)
 
@@ -37,36 +43,32 @@ streamlit >= 1.32
 
 boto3 >= 1.34
 
-openpyxl >= 3.1
-
-pandas >= 2.2
-
 oletools >= 0.60
 
-langgraph >= 0.0.23
+openpyxl >= 3.1
+
+numpy >= 1.26
 
 🖥️ Runtime Environment
 
 Runs locally or on a server with Python
 
-Requires AWS credentials with Bedrock access (region: us-east-1)
+No external DB required (SQLite file stored alongside app)
 
-No external DB required (outputs stored in the working directory)
+Requires AWS credentials with Bedrock access (region: us-east-1)
 
 ⚙️ Workflow Summary
 
-User uploads Excel file (.xlsm, .xlsb, .xls)
+User uploads Excel file (.xlsm/.xls/.xlsb/.xlsx)
 
-App saves a macro-free .xlsx copy (via openpyxl)
+App extracts VBA macros (olevba)
 
-VBA macros are extracted (olevba)
+Normalizes + embeds macros (Titan Embed)
 
-VBA code categorized (Claude via Bedrock) → formulas, pivot_table, pivot_chart, user_form, normal_operations
+Looks for best match in SQLite DB (cosine similarity)
 
-Prompt is built from category templates (PROMPTS)
+Builds prompt and sends to Claude (Bedrock)
 
-Claude (Bedrock) generates equivalent Python code → streamed into app
+Saves generated Python code (.py) and macro-free Excel replica (.xlsx)
 
-Generated Python code is saved as a .py file (same name as workbook)
-
-Results shown step by step in Streamlit expanders + progress bar
+User can upvote/downvote → feedback stored in DB to improve future matches
